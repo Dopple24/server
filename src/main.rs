@@ -1,21 +1,22 @@
-use std::collections::VecDeque;
+use std::collections::HashSet;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::net::{TcpListener, TcpStream};
 use std::os::unix::fs::FileExt;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use std::{thread, time};
 use uuid::Uuid;
 
 const CHUNK_SIZE: usize = 32768;
 const OVERHEAD: usize = 11;
-const MAX_STORED: usize = 10;
+const MAX_STORED: usize = 20;
 
 trait Code {
     fn get_code(&self) -> u8;
     fn get_message(&self) -> Vec<u8>;
-    fn respond(&self) -> Vec<u8>;
+    fn respond(&self, message: Vec<u8>) -> Vec<u8>;
 }
 
 enum TransferSuccess {
@@ -36,10 +37,10 @@ impl Code for TransferSuccess {
         buffer.extend_from_slice(msg.as_bytes());
         buffer
     }
-    fn respond(&self) -> Vec<u8> {
+    fn respond(&self, message: Vec<u8>) -> Vec<u8> {
         let mut buf: Vec<u8> = Vec::with_capacity(16);
         buf.push(self.get_code());
-        buf.extend_from_slice(&self.get_message());
+        buf.extend_from_slice(&message);
         buf
     }
 }
@@ -104,10 +105,16 @@ impl Request {
     }
 }
 
+struct SendChunk {
+    request_tape: u8,
+    header: Vec<u8>,
+    body: Vec<u8>,
+}
+
 #[derive(Debug)]
 struct TransferedFile {
     uuid: Uuid,
-    file_size: usize,
+    file_size_chunks: usize,
     file: Arc<File>,
 }
 
@@ -126,7 +133,7 @@ impl Code for ErrorTransfer {
         }
     }
     fn get_message(&self) -> Vec<u8> {
-        let mut buffer: Vec<u8> = Vec::with_capacity(1023);
+        let mut buffer: Vec<u8> = Vec::with_capacity(15);
         let msg: String = match self {
             Self::InvalidLength => "40 invalid length".to_string(),
             Self::InvalidUuid => "40 invalid uuid".to_string(),
@@ -141,10 +148,10 @@ impl Code for ErrorTransfer {
         buffer.extend_from_slice(msg.as_bytes());
         buffer
     }
-    fn respond(&self) -> Vec<u8> {
+    fn respond(&self, message: Vec<u8>) -> Vec<u8> {
         let mut buf: Vec<u8> = Vec::with_capacity(16);
         buf.push(self.get_code());
-        buf.extend_from_slice(&self.get_message());
+        buf.extend_from_slice(&message);
         buf
     }
 }
@@ -152,15 +159,17 @@ impl Code for ErrorTransfer {
 #[derive(Clone)]
 struct Transfer {
     chunks: Vec<[u8; CHUNK_SIZE]>,
-    responses: Vec<[u8; 1024]>,
+    responses: Vec<[u8; 16]>,
     should_die: bool,
     max_workers: usize,
     dead_workers: usize,
+    chunk_log: Vec<usize>,
 }
 
 impl Transfer {
     fn new(max_workers: usize) -> Self {
         Transfer {
+            chunk_log: Vec::new(),
             chunks: Vec::new(),
             responses: Vec::new(),
             should_die: false,
@@ -171,22 +180,22 @@ impl Transfer {
 }
 
 fn recieve_chunk(contents: Vec<u8>, file: &Arc<TransferedFile>) -> Result<usize, ErrorTransfer> {
+    println!("contents: {:?}", &contents[0..20]);
     let mut id_b = [0; 8];
     for i in 0..8 {
         id_b[i] = contents[i + 1];
     }
     let chunk_id = u64::from_be_bytes(id_b);
-    println!("chunk id: {chunk_id}, {:?}", id_b);
     let mut size_b = [0; 2];
     size_b[0] = contents[9];
     size_b[1] = contents[10];
     let chunk_size = u16::from_be_bytes(size_b);
-    println!("chunk_size: {chunk_size}");
+    println!("chunk_size: {}", chunk_size);
     let mut trimed: Vec<u8> = Vec::new();
     for i in 0..chunk_size {
         trimed.push(contents[(i + 11) as usize])
     }
-    println!("trimmed: {:?}", trimed);
+    println!("chunk_id: {chunk_id}");
     let location = chunk_id * (CHUNK_SIZE - OVERHEAD) as u64;
     match file.file.write_at(&trimed[..], location) {
         Ok(_) => Ok(chunk_id as usize),
@@ -202,7 +211,6 @@ fn init_transfer(req: Request) -> Result<TransferedFile, ErrorTransfer> {
     for i in 0..=15 {
         uuid_bytes[i] = req.contents[i];
     }
-    println!("{:?}", uuid_bytes);
     let name_len = req.contents[23] as usize;
     let file_name = String::from_utf8_lossy(&req.contents[24..24 + name_len]).to_string();
     let file_path = format!("./storage/{}", file_name);
@@ -217,9 +225,10 @@ fn init_transfer(req: Request) -> Result<TransferedFile, ErrorTransfer> {
             return Err(ErrorTransfer::InternalServerError);
         }
     };
+    println!("size bytes: {:?}", &req.contents[16..=22]);
     Ok(TransferedFile {
-        file_size: match decode_size(&req.contents[16..=22]) {
-            Ok(val) => val,
+        file_size_chunks: match decode_size(&req.contents[16..=22]) {
+            Ok(val) => val.div_ceil(CHUNK_SIZE - OVERHEAD),
             Err(err) => {
                 return Err(err);
             }
@@ -244,7 +253,6 @@ fn handle_request(
             return Err(ErrorTransfer::NotFound);
         }
     };
-    println!("request being handled{:?}", req);
     match req.request_type {
         RequestType::Disconnect => {
             panic!();
@@ -263,7 +271,6 @@ fn handle_init(req: Request) -> Result<TransferedFile, ErrorTransfer> {
     match req.request_type {
         RequestType::Init => {
             let fil = init_transfer(req);
-            println!("{:?}", fil);
             fil
         }
         _ => Err(ErrorTransfer::NotInitialized),
@@ -324,7 +331,6 @@ fn handle_client(mut stream: TcpStream, max_workers: usize) {
                 let (chunk, should_die): (Option<Vec<u8>>, bool) = {
                     let mut lock = transf.lock().unwrap();
                     if lock.chunks.len() > 0 {
-                        println!("{} took a chunk", i);
                         (Some(lock.chunks.pop().unwrap().to_vec()), false)
                     } else if lock.should_die {
                         (None, true)
@@ -334,28 +340,35 @@ fn handle_client(mut stream: TcpStream, max_workers: usize) {
                 };
                 if let Some(c) = chunk {
                     let resp = recieve_chunk(c, &fil);
+                    println!("response from receive chunk: {:?}", resp);
                     {
                         let mut lock = transf.lock().unwrap();
-                        lock.responses.push(match resp {
-                            Ok(_id) => {
-                                let response = TransferSuccess::Ok.respond();
-                                let mut arr = [0u8; 1024];
-                                let len = response.len().min(1024);
-                                arr[..len].copy_from_slice(&response[..len]);
+                        let resp = match resp {
+                            Ok(id) => {
+                                let response =
+                                    TransferSuccess::Ok.respond((id as u64).to_be_bytes().to_vec());
+                                let mut arr = [0u8; 16];
+                                arr[8..].copy_from_slice(&response[1..]);
+                                arr[0] = response[0];
+                                println!("{:?}", response);
+                                lock.chunk_log.push(id);
                                 arr
                             }
                             Err(y) => {
-                                let response = y.respond();
-                                let mut arr = [0u8; 1024];
-                                let len = response.len().min(1024);
-                                arr[..len].copy_from_slice(&response[..len]);
+                                let response = y.respond(vec![0u8]);
+                                let mut arr = [0u8; 16];
+                                let len = response.len().min(16);
+                                arr[1..len].copy_from_slice(&response[1..len]);
+                                arr[0] = response[0];
                                 arr
                             }
-                        });
+                        };
+                        lock.responses.push(resp);
                     }
                 } else if should_die {
                     let mut lock = transf.lock().unwrap();
                     lock.dead_workers += 1;
+                    println!("{i} died");
                     break;
                 } else {
                     thread::sleep(time::Duration::from_millis(10));
@@ -367,38 +380,106 @@ fn handle_client(mut stream: TcpStream, max_workers: usize) {
     //READER
     println!("starting next loop");
     let tran = Arc::clone(&transfer);
+    stream.set_nonblocking(true).unwrap();
     loop {
-        println!("loop");
-        let mut buffer = [0u8; CHUNK_SIZE];
-        stream.read(&mut buffer).unwrap();
-        if buffer[0] == 2 {
-            let transfered = {
-                let mut transf = tran.lock().unwrap();
-                if transf.chunks.len() < MAX_STORED {
-                    transf.chunks.push(buffer);
-                    true
+        let mut header = [0u8; 1];
+        match stream.read_exact(&mut header) {
+            Ok(_) => {
+                if header[0] == 2 {
+                    let mut header_buf = [0u8; 10];
+                    match stream.read_exact(&mut header_buf) {
+                        Ok(_) => {}
+                        Err(y) => {
+                            eprintln!("{:?}", y);
+                            continue;
+                        }
+                    };
+                    let size = u16::from_be_bytes(header_buf[8..10].try_into().unwrap());
+                    let mut body_buf = vec![0u8; size as usize];
+                    println!("size: {size}");
+                    match stream.read_exact(&mut body_buf) {
+                        Ok(_) => {}
+                        Err(y) => {
+                            eprintln!("{:?}", y);
+                            continue;
+                        }
+                    };
+                    let mut reconstructed = [0u8; CHUNK_SIZE];
+                    reconstructed[0] = 2;
+                    reconstructed[1..11].copy_from_slice(&mut header_buf);
+                    reconstructed[11..11 + size as usize].copy_from_slice(&mut body_buf);
+                    let transfered = {
+                        let mut transf = tran.lock().unwrap();
+                        if transf.chunks.len() < MAX_STORED {
+                            transf.chunks.push(reconstructed);
+                            true
+                        } else {
+                            false
+                        }
+                    };
+                    if !transfered {
+                        let _ = stream.write_all(&ErrorTransfer::TooFast.respond(vec![0u8; 15]));
+                    }
+                } else if header[0] == 3 {
+                    println!("3 came");
+                    let mut lock = tran.lock().unwrap();
+                    println!("locked");
+                    let chunks_number = { lock_file.file_size_chunks };
+                    println!(
+                        "chunks_log: {:?}, chunks_number {}",
+                        lock.chunk_log, chunks_number
+                    );
+                    if lock.chunk_log.len() == chunks_number {
+                        lock.should_die = true;
+                        let mut buf = vec![0u8; 9];
+                        buf[0] = 23u8.to_be_bytes()[0];
+                        println!("buf: {:?}", buf);
+                        stream.write_all(&buf).unwrap();
+                    } else {
+                        let present: HashSet<usize> = lock.chunk_log.clone().into_iter().collect();
+                        let missing: Vec<usize> = (0..chunks_number)
+                            .filter(|x| !present.contains(x))
+                            .collect();
+                        let mut buf = Vec::new();
+                        buf.extend_from_slice(&mut vec![23u8]);
+                        let size_bytes = (missing.len() as u64).to_be_bytes();
+                        buf.extend_from_slice(&size_bytes);
+                        missing.iter().for_each(|miss| {
+                            buf.extend_from_slice(&(*miss as u64).to_be_bytes());
+                        });
+                        println!("missing: {:?}", missing);
+                        println!("buf: {:?}", buf);
+                        match stream.write_all(&buf) {
+                            Ok(_) => println!("write ok"),
+                            Err(e) => println!("write error: {e}"),
+                        }
+                    }
+                    println!("unlocked");
                 } else {
-                    false
+                    println!("44 header: {} not found", header[0]);
+                    let _ = stream.write_all(&ErrorTransfer::NotFound.respond(vec![0u8; 17]));
                 }
-            };
-            if !transfered {
-                let _ = stream.write_all(&ErrorTransfer::TooFast.respond());
             }
-        } else if buffer[0] == 3 {
-            let mut lock = tran.lock().unwrap();
-            lock.should_die = true;
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+            Err(e) => {
+                eprintln!("read error: {e}");
+                break;
+            }
         }
         {
             let mut lock = tran.lock().unwrap();
             while !lock.responses.is_empty() {
-                println!("writing");
-                let _ = stream.write_all(&lock.responses.pop().unwrap());
+                let response_to_send = lock.responses.pop().unwrap();
+                let res = stream.write_all(&response_to_send);
+                println!("{:?}, responses in queue: {:?}", res, response_to_send);
+                thread::sleep(Duration::from_millis(5));
             }
             if lock.dead_workers == lock.max_workers {
                 break;
             }
         };
     }
+
     println!("loop broken");
     handles
         .into_iter()
@@ -412,6 +493,7 @@ fn decode_size(bytes: &[u8]) -> Result<usize, ErrorTransfer> {
     }
 
     let mut value = 0usize;
+    println!("{:?}", bytes);
 
     for (i, &b) in bytes.iter().enumerate() {
         let shift = 7 * i;
@@ -427,6 +509,7 @@ fn decode_size(bytes: &[u8]) -> Result<usize, ErrorTransfer> {
 
         value = value.checked_add(part).ok_or(ErrorTransfer::Overflow)?;
     }
+    println!("{value}");
 
     Ok(value)
 }
