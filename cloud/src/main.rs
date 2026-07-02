@@ -1,9 +1,10 @@
-use crate::file_transfer::handle_client;
+use router::handle_client;
 use std::net::TcpListener;
 
 mod file_transfer;
 mod request;
 mod response;
+mod router;
 
 fn main() -> std::io::Result<()> {
     let listener = TcpListener::bind("127.0.0.1:6543")?;

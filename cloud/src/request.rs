@@ -14,7 +14,7 @@ pub enum RequestType {
 }
 
 impl RequestType {
-    fn get_type(code: u8) -> Self {
+    pub fn get_type(code: u8) -> Self {
         match code {
             0 => Self::Disconnect,
             1 => Self::Init,

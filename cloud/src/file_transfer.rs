@@ -152,49 +152,44 @@ fn handle_init(req: Request) -> Result<TransferedFile, ErrorTransfer> {
     }
 }
 
-pub fn handle_client(mut stream: TcpStream, max_workers: usize) {
+pub fn receive_init(mut stream: TcpStream, init_message: [u8; CHUNK_SIZE], max_workers: usize) {
     let mut file: Option<TransferedFile> = None;
     let transfer = Arc::new(Mutex::new(Transfer::new(max_workers)));
-    loop {
-        let mut buffer = [0; CHUNK_SIZE];
-        let _ = stream.read(&mut buffer);
-        let req = match Request::decipher(buffer) {
-            Ok(x) => {
-                println!("deciphered: {:?}", x);
-                x
+    let req = match Request::decipher(init_message) {
+        Ok(x) => {
+            println!("deciphered: {:?}", x);
+            x
+        }
+        Err(y) => {
+            println!("deciphered: {:?}", y);
+            let mut buf = [0; 128];
+            buf[0] = y.get_code();
+            for (index, byte) in y.get_message().into_iter().enumerate() {
+                buf[index + 1] = byte
             }
-            Err(y) => {
-                println!("deciphered: {:?}", y);
-                let mut buf = [0; 128];
-                buf[0] = y.get_code();
-                for (index, byte) in y.get_message().into_iter().enumerate() {
-                    buf[index + 1] = byte
-                }
-                let _ = stream.write_all(&buf);
-                return ();
+            let _ = stream.write_all(&buf);
+            return ();
+        }
+    };
+    match handle_init(req) {
+        Ok(init) => {
+            file = Some(init);
+            let mut buf = [0; 32];
+            buf[0] = TransferSuccess::Ok.get_code();
+            for (index, byte) in TransferSuccess::Ok.get_message().into_iter().enumerate() {
+                buf[index + 1] = byte
             }
-        };
-        match handle_init(req) {
-            Ok(init) => {
-                file = Some(init);
-                let mut buf = [0; 32];
-                buf[0] = TransferSuccess::Ok.get_code();
-                for (index, byte) in TransferSuccess::Ok.get_message().into_iter().enumerate() {
-                    buf[index + 1] = byte
-                }
-                let _ = stream.write_all(&buf);
-                break;
+            let _ = stream.write_all(&buf);
+        }
+        Err(y) => {
+            let mut buf = [0; 128];
+            buf[0] = y.get_code();
+            for (index, byte) in y.get_message().into_iter().enumerate() {
+                buf[index + 1] = byte
             }
-            Err(y) => {
-                let mut buf = [0; 128];
-                buf[0] = y.get_code();
-                for (index, byte) in y.get_message().into_iter().enumerate() {
-                    buf[index + 1] = byte
-                }
-                let _ = stream.write_all(&buf);
-            }
-        };
-    }
+            let _ = stream.write_all(&buf);
+        }
+    };
     let lock_file = Arc::new(file.unwrap());
     let mut handles = Vec::new();
 
