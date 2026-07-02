@@ -1,7 +1,8 @@
+use blake3::{Hash, Hasher};
 use std::collections::HashMap;
 use std::fs::File;
 use std::fs::OpenOptions;
-use std::io::{Error, Read, Write};
+use std::io::{self, Error, Read, Seek, SeekFrom, Write};
 use std::net::TcpStream;
 use std::os::unix::fs::FileExt;
 use std::path::Path;
@@ -187,7 +188,8 @@ fn main() -> std::io::Result<()> {
         loop {
             match stream.read_exact(&mut response_code) {
                 Ok(_) => {
-                    if response_code[0] != 0 {
+                    if response_code[0] == 23 {
+                        println!("response for 3 is {:?}", response_code[0]);
                         break;
                     }
                 }
@@ -228,6 +230,60 @@ fn main() -> std::io::Result<()> {
         }
         chunks_to_send.lock().unwrap().append(&mut missing);
     }
+
+    let mut stream = arc_stream.lock().unwrap();
+
+    println!("waiting for server");
+
+    loop {
+        let mut buf = [0u8; 1];
+        match stream.read_exact(&mut buf) {
+            Ok(_) => match buf[0] {
+                21 => {
+                    println!("success");
+                    break;
+                }
+                val => {
+                    println!("44 header: {} not found", val);
+                }
+            },
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+            Err(_) => {
+                println!("44 header: {} not found", buf[0]);
+            }
+        };
+    }
+
+    println!("sending hash");
+
+    let mut file_hash_buf: [u8; 32] = hash_file(fil).unwrap().try_into().unwrap();
+    let mut buf = vec![0u8; 33];
+    buf[1..].copy_from_slice(&mut file_hash_buf);
+    buf[0] = 4;
+
+    stream.write_all(&buf).unwrap();
+
+    println!("sent {:?}", buf);
+
+    loop {
+        let mut buf = [0u8; 1];
+        match stream.read_exact(&mut buf) {
+            Ok(_) => match buf[0] {
+                24 => {
+                    println!("success");
+                    break;
+                }
+                val => {
+                    println!("44 header: {} not found", val);
+                }
+            },
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+            Err(_) => {
+                println!("44 header: {} not found", buf[0]);
+            }
+        };
+    }
+
     Ok(())
 }
 
@@ -318,4 +374,28 @@ fn send_chunk(stream: &Arc<Mutex<TcpStream>>, id: u64, data: &[u8]) -> Result<()
         println!("stopped writing");
     }
     Ok(())
+}
+
+fn hash_file(file: Arc<File>) -> io::Result<Hash> {
+    let mut hasher = Hasher::new();
+    let mut buf = [0u8; 65536];
+    let mut file = match Arc::try_unwrap(file) {
+        Ok(a) => a,
+        Err(_) => {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "arc unwrap failed".to_string(),
+            ));
+        }
+    };
+
+    loop {
+        let n = file.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+
+    Ok(hasher.finalize())
 }
