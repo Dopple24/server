@@ -1,17 +1,33 @@
+use blake3::{Hash, Hasher};
+use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::fs::{File, OpenOptions};
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{self, Read, Seek, SeekFrom, Write};
+use std::io::{BufReader, Error};
 use std::net::{TcpListener, TcpStream};
 use std::os::unix::fs::FileExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
-use std::{thread, time};
+use std::time::{Duration, SystemTime};
+use std::{
+    thread,
+    time::{self, UNIX_EPOCH},
+};
 use uuid::Uuid;
 
 const CHUNK_SIZE: usize = 32768;
 const OVERHEAD: usize = 11;
 const MAX_STORED: usize = 20;
+
+#[derive(Serialize, Deserialize)]
+struct ConfigFile {
+    last_changed_at: u64,
+    uuid: Uuid,
+    file_size_chunks: usize,
+    transfered_chunks: HashSet<usize>,
+    owner: Vec<Uuid>,
+    is_public: bool,
+}
 
 trait Code {
     fn get_code(&self) -> u8;
@@ -56,6 +72,7 @@ enum ErrorTransfer {
     ThisFileExists,
     InternalServerError,
     TooFast,
+    HashesDoNotMatch,
 }
 
 #[derive(Debug)]
@@ -115,6 +132,9 @@ struct SendChunk {
 struct TransferedFile {
     uuid: Uuid,
     file_size_chunks: usize,
+    storage_path: PathBuf,
+    temp_path: PathBuf,
+    config_path: Mutex<PathBuf>,
     file: Arc<File>,
 }
 
@@ -127,6 +147,7 @@ impl Code for ErrorTransfer {
             Self::NotFound => 44,
             Self::NotInitialized => 45,
             Self::AlreadyInitialized => 46,
+            Self::HashesDoNotMatch => 47,
             Self::ThisFileExists => 41,
             Self::InternalServerError => 50,
             Self::TooFast => 51,
@@ -141,6 +162,7 @@ impl Code for ErrorTransfer {
             Self::NotFound => "44 not found".to_string(),
             Self::NotInitialized => "45 not initialized".to_string(),
             Self::AlreadyInitialized => "46 already initialized".to_string(),
+            Self::HashesDoNotMatch => "47 hashes do not match".to_string(),
             Self::ThisFileExists => "41 file with this name already exists".to_string(),
             Self::InternalServerError => "50 internal server error".to_string(),
             Self::TooFast => "51 too fast".to_string(),
@@ -163,13 +185,13 @@ struct Transfer {
     should_die: bool,
     max_workers: usize,
     dead_workers: usize,
-    chunk_log: Vec<usize>,
+    chunk_log: HashSet<usize>,
 }
 
 impl Transfer {
     fn new(max_workers: usize) -> Self {
         Transfer {
-            chunk_log: Vec::new(),
+            chunk_log: HashSet::new(),
             chunks: Vec::new(),
             responses: Vec::new(),
             should_die: false,
@@ -213,9 +235,16 @@ fn init_transfer(req: Request) -> Result<TransferedFile, ErrorTransfer> {
     }
     let name_len = req.contents[23] as usize;
     let file_name = String::from_utf8_lossy(&req.contents[24..24 + name_len]).to_string();
-    let file_path = format!("./storage/{}", file_name);
+
+    let file_path = format!("./temp/{}", file_name);
+    let storage_file_path = format!("./storage/{}", file_name);
+    let config_file_path = format!("{}.config", file_path);
+
     let path = Path::new(&file_path);
-    if path.exists() {
+    let storage_path = Path::new(&storage_file_path);
+    let config_path = Path::new(&config_file_path);
+
+    if path.exists() || storage_path.exists() || config_path.exists() {
         return Err(ErrorTransfer::ThisFileExists);
     }
     let file = match File::create(path) {
@@ -234,37 +263,11 @@ fn init_transfer(req: Request) -> Result<TransferedFile, ErrorTransfer> {
             }
         },
         file: Arc::new(file),
+        temp_path: path.to_path_buf(),
+        storage_path: storage_path.to_path_buf(),
+        config_path: Mutex::new(config_path.to_path_buf()),
         uuid: Uuid::from_bytes_le(uuid_bytes),
     })
-}
-
-fn disconnect() -> ErrorTransfer {
-    todo!();
-}
-
-fn handle_request(
-    data: [u8; CHUNK_SIZE],
-    file: Arc<TransferedFile>,
-) -> Result<TransferSuccess, ErrorTransfer> {
-    let req = match Request::decipher(data) {
-        Ok(x) => x,
-        Err(y) => {
-            eprintln!("{:?}", y);
-            return Err(ErrorTransfer::NotFound);
-        }
-    };
-    match req.request_type {
-        RequestType::Disconnect => {
-            panic!();
-            //Err(disconnect());
-        }
-        RequestType::Init => Err(ErrorTransfer::AlreadyInitialized),
-        RequestType::ChunkTransfer => match recieve_chunk(req.contents, &file) {
-            Ok(_val) => Ok(TransferSuccess::Ok),
-            Err(y) => Err(y),
-        },
-        RequestType::Unknown => Err(ErrorTransfer::NotFound),
-    }
 }
 
 fn handle_init(req: Request) -> Result<TransferedFile, ErrorTransfer> {
@@ -319,6 +322,29 @@ fn handle_client(mut stream: TcpStream, max_workers: usize) {
     let lock_file = Arc::new(file.unwrap());
     let mut handles = Vec::new();
 
+    {
+        let config_path = {
+            let lock = lock_file.config_path.lock().unwrap();
+            lock.clone()
+        };
+        let mut config_file = File::create(config_path).unwrap();
+
+        let config = ConfigFile {
+            last_changed_at: time::SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos() as u64,
+            uuid: lock_file.uuid,
+            file_size_chunks: lock_file.file_size_chunks,
+            transfered_chunks: HashSet::new(),
+            is_public: false,  //is_public is todo!()
+            owner: Vec::new(), //owner is todo!()
+        };
+
+        let json = serde_json::to_string_pretty(&config).unwrap();
+        config_file.write_all(json.as_bytes()).unwrap();
+    }
+
     // WORKERS
     for i in 0..max_workers {
         println!("worker #{} initialized", i);
@@ -342,7 +368,6 @@ fn handle_client(mut stream: TcpStream, max_workers: usize) {
                     let resp = recieve_chunk(c, &fil);
                     println!("response from receive chunk: {:?}", resp);
                     {
-                        let mut lock = transf.lock().unwrap();
                         let resp = match resp {
                             Ok(id) => {
                                 let response =
@@ -351,7 +376,18 @@ fn handle_client(mut stream: TcpStream, max_workers: usize) {
                                 arr[8..].copy_from_slice(&response[1..]);
                                 arr[0] = response[0];
                                 println!("{:?}", response);
-                                lock.chunk_log.push(id);
+                                let log_len = {
+                                    let mut lock = transf.lock().unwrap();
+                                    lock.chunk_log.insert(id);
+                                    lock.chunk_log.len()
+                                };
+                                if log_len % 10 == 8 {
+                                    let res = update_config(&fil.config_path, &transf);
+                                    println!("response_: {:?}", res);
+                                } else {
+                                    println!("log_len: {log_len}");
+                                }
+
                                 arr
                             }
                             Err(y) => {
@@ -363,6 +399,7 @@ fn handle_client(mut stream: TcpStream, max_workers: usize) {
                                 arr
                             }
                         };
+                        let mut lock = transf.lock().unwrap();
                         lock.responses.push(resp);
                     }
                 } else if should_die {
@@ -436,7 +473,7 @@ fn handle_client(mut stream: TcpStream, max_workers: usize) {
                         println!("buf: {:?}", buf);
                         stream.write_all(&buf).unwrap();
                     } else {
-                        let present: HashSet<usize> = lock.chunk_log.clone().into_iter().collect();
+                        let present: HashSet<usize> = lock.chunk_log.clone();
                         let missing: Vec<usize> = (0..chunks_number)
                             .filter(|x| !present.contains(x))
                             .collect();
@@ -484,6 +521,57 @@ fn handle_client(mut stream: TcpStream, max_workers: usize) {
     handles
         .into_iter()
         .for_each(|handle| handle.join().unwrap());
+
+    let mut ready_buf = [21u8; 1];
+    stream.write_all(&mut ready_buf).unwrap();
+
+    println!("sent {:?}", ready_buf);
+
+    println!("awaiting hash confirmation");
+
+    {
+        loop {
+            let mut header_buf = [0u8; 1];
+            match stream.read_exact(&mut header_buf) {
+                Ok(_) => match header_buf[0] {
+                    4 => {
+                        let mut hash_buf = [0u8; 32];
+                        stream.read_exact(&mut hash_buf).unwrap();
+                        let server_hash = hash_file(lock_file.temp_path.clone()).unwrap();
+                        let client_hash: Hash = hash_buf.try_into().unwrap();
+                        if server_hash == client_hash {
+                            println!("hashes match");
+                            let res = stream.write_all(&{
+                                let mut resp = vec![0u8; 18];
+                                resp[0] = 24;
+                                resp
+                            });
+                            println!("result: {:?}", res);
+                            break;
+                        } else {
+                            println!("hashes do not match");
+                            let _ = stream
+                                .write_all(&ErrorTransfer::HashesDoNotMatch.respond(vec![0u8; 17]));
+                        }
+                    }
+                    0 => {}
+                    val => {
+                        println!("44 conf header: {} not found", val);
+                        let _ = stream.write_all(&ErrorTransfer::NotFound.respond(vec![0u8; 17]));
+                    }
+                },
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+                Err(_) => {
+                    println!("44 header: {} not found", header_buf[0]);
+                    let _ = stream.write_all(&ErrorTransfer::NotFound.respond(vec![0u8; 17]));
+                }
+            };
+        }
+    }
+    println!("file transfer complete");
+
+    std::fs::copy(&lock_file.temp_path, &lock_file.storage_path).unwrap();
+    std::fs::remove_file(&lock_file.temp_path).unwrap();
 }
 
 fn decode_size(bytes: &[u8]) -> Result<usize, ErrorTransfer> {
@@ -514,25 +602,56 @@ fn decode_size(bytes: &[u8]) -> Result<usize, ErrorTransfer> {
     Ok(value)
 }
 
-fn send_feedback(feedback: Result<TransferSuccess, ErrorTransfer>) -> [u8; 128] {
-    match feedback {
-        Ok(val) => {
-            let mut buf = [0; 128];
-            buf[0] = val.get_code();
-            for (index, byte) in val.get_message().into_iter().enumerate() {
-                buf[index + 1] = byte
-            }
-            buf
-        }
-        Err(y) => {
-            let mut buf = [0; 128];
-            buf[0] = y.get_code();
-            for (index, byte) in y.get_message().into_iter().enumerate() {
-                buf[index + 1] = byte
-            }
-            buf
-        }
+fn update_config(path: &Mutex<PathBuf>, transf: &Arc<Mutex<Transfer>>) -> Result<(), Error> {
+    let path = path.lock().unwrap();
+
+    println!("config path: {:?}", path);
+
+    let mut file = OpenOptions::new().read(true).write(true).open(&*path)?;
+
+    let reader = BufReader::new(&file);
+    let mut config: ConfigFile = serde_json::from_reader(reader)?;
+
+    // Convert Vec to HashSet for comparison
+    let existing: HashSet<usize> = config.transfered_chunks.iter().copied().collect();
+
+    let lock = transf.lock().unwrap();
+
+    if existing == lock.chunk_log {
+        return Ok(());
     }
+
+    config.last_changed_at = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos() as u64;
+
+    // Merge new chunks in
+    config.transfered_chunks = existing.union(&lock.chunk_log).copied().collect();
+
+    // Overwrite from the start, truncate leftover bytes
+    let json = serde_json::to_string_pretty(&config)?;
+    file.seek(SeekFrom::Start(0))?;
+    file.set_len(0)?;
+    file.write_all(json.as_bytes())?;
+
+    Ok(())
+}
+
+fn hash_file(file: PathBuf) -> io::Result<Hash> {
+    let mut hasher = Hasher::new();
+    let mut buf = [0u8; 65536];
+    let mut file = File::open(file).unwrap();
+
+    loop {
+        let n = file.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+
+    Ok(hasher.finalize())
 }
 
 fn main() -> std::io::Result<()> {
