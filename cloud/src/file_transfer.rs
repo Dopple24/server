@@ -4,6 +4,7 @@ use crate::response::{Code, ErrorTransfer, TransferSuccess};
 use blake3::{Hash, Hasher};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
+use std::fs::create_dir_all;
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::io::{BufReader, Error};
@@ -11,6 +12,7 @@ use std::net::TcpStream;
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::thread::JoinHandle;
 use std::time::{Duration, SystemTime};
 use std::{
     thread,
@@ -21,6 +23,8 @@ use uuid::Uuid;
 pub const CHUNK_SIZE: usize = 32768;
 const OVERHEAD: usize = 11;
 const MAX_STORED: usize = 20;
+const TEMP_FOLDER_LOCATION: &str = "./temp";
+const STORAGE_FOLDER_LOCATION: &str = "./storage";
 
 #[derive(Serialize, Deserialize)]
 struct ConfigFile {
@@ -106,11 +110,20 @@ fn init_transfer(req: Request) -> Result<TransferedFile, ErrorTransfer> {
     let name_len = req.contents[23] as usize;
     let file_name = String::from_utf8_lossy(&req.contents[24..24 + name_len]).to_string();
 
-    let file_path = format!("./temp/{}", file_name);
-    let storage_file_path = format!("./storage/{}", file_name);
-    let config_file_path = format!("{}.config", file_path);
+    let temp_location = Path::new(TEMP_FOLDER_LOCATION);
+    let stor_location = Path::new(STORAGE_FOLDER_LOCATION);
 
-    println!("paths: {:?}, {:?}", file_path, storage_file_path);
+    if !temp_location.exists() {
+        create_dir_all(temp_location);
+    }
+
+    if !stor_location.exists() {
+        create_dir_all(stor_location);
+    }
+
+    let file_path = format!("{TEMP_FOLDER_LOCATION}/{}", file_name);
+    let storage_file_path = format!("{STORAGE_FOLDER_LOCATION}/{}", file_name);
+    let config_file_path = format!("{}.config", file_path);
 
     let path = Path::new(&file_path);
     let storage_path = Path::new(&storage_file_path);
@@ -152,7 +165,7 @@ fn handle_init(req: Request) -> Result<TransferedFile, ErrorTransfer> {
     }
 }
 
-pub fn receive_init(mut stream: TcpStream, init_message: [u8; CHUNK_SIZE], max_workers: usize) {
+pub fn recieve(mut stream: TcpStream, init_message: [u8; CHUNK_SIZE], max_workers: usize) {
     let mut file: Option<TransferedFile> = None;
     let transfer = Arc::new(Mutex::new(Transfer::new(max_workers)));
     let req = match Request::decipher(init_message) {
@@ -191,36 +204,73 @@ pub fn receive_init(mut stream: TcpStream, init_message: [u8; CHUNK_SIZE], max_w
         }
     };
     let lock_file = Arc::new(file.unwrap());
-    let mut handles = Vec::new();
 
-    {
-        let config_path = {
-            let lock = lock_file.config_path.lock().unwrap();
-            lock.clone()
-        };
-        let mut config_file = File::create(config_path).unwrap();
-
-        let config = ConfigFile {
-            last_changed_at: time::SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos() as u64,
-            uuid: lock_file.uuid,
-            file_size_chunks: lock_file.file_size_chunks,
-            transfered_chunks: HashSet::new(),
-            is_public: false,  //is_public is todo!()
-            owner: Vec::new(), //owner is todo!()
-        };
-
-        let json = serde_json::to_string_pretty(&config).unwrap();
-        config_file.write_all(json.as_bytes()).unwrap();
-    }
+    setup_config(&lock_file);
 
     // WORKERS
+    let handles = init_workers_reciever(max_workers, &transfer, &lock_file);
+
+    //READER
+    println!("reader initialized");
+    let tran = Arc::clone(&transfer);
+    stream.set_nonblocking(true).unwrap();
+
+    init_stream_reader(&mut stream, &tran, &lock_file);
+
+    println!("loop broken");
+    handles
+        .into_iter()
+        .for_each(|handle| handle.join().unwrap());
+
+    let mut ready_buf = [21u8; 1];
+    stream.write_all(&mut ready_buf).unwrap();
+
+    println!("sent {:?}", ready_buf);
+
+    println!("awaiting hash confirmation");
+
+    execute_final_completion_check(&mut stream, &lock_file);
+
+    std::fs::copy(&lock_file.temp_path, &lock_file.storage_path).unwrap();
+    std::fs::remove_file(&lock_file.temp_path).unwrap();
+    let cfg_path = lock_file.config_path.lock().unwrap().clone();
+    std::fs::remove_file(&cfg_path).unwrap();
+}
+
+fn setup_config(lock_file: &Arc<TransferedFile>) -> Result<(), Error> {
+    let config_path = {
+        let lock = lock_file.config_path.lock().unwrap();
+        lock.clone()
+    };
+    let mut config_file = File::create(config_path)?;
+
+    let config = ConfigFile {
+        last_changed_at: time::SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos() as u64,
+        uuid: lock_file.uuid,
+        file_size_chunks: lock_file.file_size_chunks,
+        transfered_chunks: HashSet::new(),
+        is_public: false,  //is_public is todo!()
+        owner: Vec::new(), //owner is todo!()
+    };
+
+    let json = serde_json::to_string_pretty(&config)?;
+    config_file.write_all(json.as_bytes())?;
+    Ok(())
+}
+
+fn init_workers_reciever(
+    max_workers: usize,
+    transfer: &Arc<Mutex<Transfer>>,
+    lock_file: &Arc<TransferedFile>,
+) -> Vec<JoinHandle<()>> {
+    let mut handles = Vec::new();
     for i in 0..max_workers {
         println!("worker #{} initialized", i);
-        let transfer_clone = Arc::clone(&transfer);
-        let file_clone = Arc::clone(&lock_file);
+        let transfer_clone = Arc::clone(transfer);
+        let file_clone = Arc::clone(lock_file);
         handles.push(thread::spawn(move || {
             let transf = transfer_clone;
             let fil = file_clone;
@@ -284,11 +334,14 @@ pub fn receive_init(mut stream: TcpStream, init_message: [u8; CHUNK_SIZE], max_w
             }
         }));
     }
+    handles
+}
 
-    //READER
-    println!("starting next loop");
-    let tran = Arc::clone(&transfer);
-    stream.set_nonblocking(true).unwrap();
+fn init_stream_reader(
+    stream: &mut TcpStream,
+    tran: &Arc<Mutex<Transfer>>,
+    lock_file: &Arc<TransferedFile>,
+) {
     loop {
         let mut header = [0u8; 1];
         match stream.read_exact(&mut header) {
@@ -380,19 +433,9 @@ pub fn receive_init(mut stream: TcpStream, init_message: [u8; CHUNK_SIZE], max_w
             }
         };
     }
+}
 
-    println!("loop broken");
-    handles
-        .into_iter()
-        .for_each(|handle| handle.join().unwrap());
-
-    let mut ready_buf = [21u8; 1];
-    stream.write_all(&mut ready_buf).unwrap();
-
-    println!("sent {:?}", ready_buf);
-
-    println!("awaiting hash confirmation");
-
+fn execute_final_completion_check(stream: &mut TcpStream, lock_file: &Arc<TransferedFile>) {
     {
         loop {
             loop {
@@ -436,9 +479,6 @@ pub fn receive_init(mut stream: TcpStream, init_message: [u8; CHUNK_SIZE], max_w
         }
     }
     println!("file transfer complete");
-
-    std::fs::copy(&lock_file.temp_path, &lock_file.storage_path).unwrap();
-    std::fs::remove_file(&lock_file.temp_path).unwrap();
 }
 
 fn decode_size(bytes: &[u8]) -> Result<usize, ErrorTransfer> {
