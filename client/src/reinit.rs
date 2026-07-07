@@ -1,80 +1,26 @@
-use crate::reinit::reinit;
-use blake3::{Hash, Hasher};
-use std::collections::HashMap;
-use std::env::args;
-use std::fs::File;
-use std::fs::OpenOptions;
-use std::io::{self, Error, Read, Seek, SeekFrom, Write};
-use std::net::TcpStream;
-use std::os::unix::fs::FileExt;
-use std::path::Path;
-use std::str::FromStr;
-use std::sync::{Arc, Mutex};
-use std::thread;
-use std::time::Duration;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::{
+    collections::HashMap,
+    fs::File,
+    io::{Read, Write},
+    net::TcpStream,
+    os::unix::fs::FileExt,
+    path::Path,
+    sync::{Arc, Mutex},
+    thread,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 use uuid::Uuid;
 
-mod reinit;
+use crate::{CHUNK_SIZE, MAX_THREADS, OVERHEAD, hash_file, send_chunk};
 
-const CHUNK_SIZE: usize = 32768;
-const OVERHEAD: usize = 11;
-const MAX_THREADS: u64 = 5;
+pub fn reinit(mut stream: TcpStream, uuid: Uuid, filename: &str) -> std::io::Result<()> {
+    let file_size = crate::get_file_size(Path::new(filename)).unwrap();
+    stream.write_all(&first_message(uuid))?;
+    let mut buf = [0u8; CHUNK_SIZE];
+    stream.read(&mut buf)?;
+    println!("buf: {}", buf[0]);
 
-#[derive(Debug)]
-enum TransferError {
-    InvalidLength,
-    InvalidUuid,
-    Overflow,
-    FileNotFound,
-    MetadataNotFound,
-}
-
-fn main() -> std::io::Result<()> {
-    let mut stream = TcpStream::connect("127.0.0.1:6543")?;
-
-    let args: Vec<String> = args().collect();
-
-    if args.len() < 2 {
-        println!("Please enter an arg. Either --send for sending or --reinit for reinitialization");
-        return Ok(());
-    }
-
-    if args[1] == "--send" {
-        sending(stream)
-    } else if args[1] == "--reinit" {
-        if args.len() < 3 {
-            println!(
-                "Please enter an arg with uuid e.g. --reinit a960866d-9a8a-4b24-ba14-d9dbe266b69b"
-            );
-            return Ok(());
-        }
-        let uuid = Uuid::from_str(&args[2]);
-        match uuid {
-            Ok(u) => reinit(stream, u, "./test.txt"),
-            Err(_) => {
-                println!("Please enter a valid uuid");
-                Ok(())
-            }
-        }
-    } else {
-        println!("Please enter an arg. Either --send for sending or --reinit for reinitialization");
-        return Ok(());
-    }
-}
-
-fn sending(mut stream: TcpStream) -> std::io::Result<()> {
-    let file_size = get_file_size(Path::new("./test.txt")).unwrap();
-    let resp = send(&mut stream, file_size, "test.txt".as_bytes())?;
-    println!("response code: {:?}", &resp.clone()[0]);
-    println!("response: {}", String::from_utf8_lossy(&resp[1..]));
-
-    if &resp.clone()[0] != &20 {
-        println!("{}", &resp.clone()[0]);
-        return Ok(());
-    }
-
-    let fil = Arc::new(File::open("./test.txt").unwrap());
+    let fil = Arc::new(File::open(filename).unwrap());
 
     let chunks_len = (file_size / (CHUNK_SIZE - OVERHEAD) as u64) + 1;
 
@@ -83,13 +29,6 @@ fn sending(mut stream: TcpStream) -> std::io::Result<()> {
 
     //u64 is id
     let chunks_in_flight: Arc<Mutex<HashMap<u64, Duration>>> = Arc::new(Mutex::new(HashMap::new()));
-
-    {
-        let mut lock = chunks_to_send.lock().unwrap();
-        for i in 1..chunks_len {
-            lock.push(i);
-        }
-    }
 
     {
         arc_stream.lock().unwrap().set_nonblocking(true).unwrap();
@@ -323,115 +262,9 @@ fn sending(mut stream: TcpStream) -> std::io::Result<()> {
     Ok(())
 }
 
-fn get_file_size(path: &Path) -> Result<u64, TransferError> {
-    let file = match OpenOptions::new().read(true).open(path) {
-        Ok(file) => file,
-        Err(_) => return Err(TransferError::FileNotFound),
-    };
-
-    let size = match file.metadata() {
-        Ok(md) => md.len(),
-        Err(_) => return Err(TransferError::MetadataNotFound),
-    };
-    println!("size: {size}");
-    Ok(size)
-}
-
-fn encode_file_size(mut value: u64) -> [u8; 7] {
-    let mut out = [0u8; 7];
-
-    for i in 0..7 {
-        out[i] = (value & 0x7F) as u8; // take 7 bits
-        value >>= 7;
-    }
-
-    out
-}
-
-fn send(stream: &mut TcpStream, data: u64, file_name: &[u8]) -> Result<[u8; 128], Error> {
-    let transfer_uuid = Uuid::new_v4();
-    let file_size = data;
-
-    println!("{:?}", transfer_uuid);
-
-    let size = encode_file_size(file_size);
-
-    let mut buffer = Vec::with_capacity(24);
-    buffer.extend_from_slice(&[1]);
-    buffer.extend_from_slice(&transfer_uuid.to_bytes_le());
-    buffer.extend_from_slice(&size);
-    buffer.extend_from_slice(&[file_name.len() as u8]);
-    buffer.extend_from_slice(&file_name);
-    //buffer.extend_from_slice(&msg);
-
-    println!(
-        "{:?}, {:?}, {:?}",
-        buffer,
-        &transfer_uuid.to_bytes_le(),
-        &file_size
-    );
-
-    match stream.write_all(&buffer) {
-        Ok(_) => (),
-        Err(y) => return Err(y),
-    };
-    let mut resp = [0u8; 128];
-    match stream.read(&mut resp) {
-        Ok(_) => (),
-        Err(res) => return Err(res),
-    };
-    Ok(resp)
-}
-
-fn send_chunk(stream: &Arc<Mutex<TcpStream>>, id: u64, data: &[u8]) -> Result<(), Error> {
-    let transfer_id: u64 = id;
-    let msg = data;
-
-    let chunk_size: u16 = msg.len() as u16;
-
-    let mut buffer = Vec::with_capacity(CHUNK_SIZE);
-    buffer.extend_from_slice(&[2]);
-    buffer.extend_from_slice(&transfer_id.to_be_bytes());
-    buffer.extend_from_slice(&chunk_size.to_be_bytes());
-    buffer.extend_from_slice(&msg);
-
-    println!(
-        "sending: 2, {:?}, {:?}, {chunk_size}",
-        &transfer_id.to_be_bytes(),
-        &chunk_size.to_be_bytes(),
-    );
-    {
-        println!("started writing");
-        let mut lock = stream.lock().unwrap();
-        match lock.write_all(&buffer) {
-            Ok(_) => (),
-            Err(y) => return Err(y),
-        };
-        println!("stopped writing");
-    }
-    Ok(())
-}
-
-fn hash_file(file: Arc<File>) -> io::Result<Hash> {
-    let mut hasher = Hasher::new();
-    let mut buf = [0u8; 65536];
-    let mut file = match Arc::try_unwrap(file) {
-        Ok(a) => a,
-        Err(_) => {
-            return Err(io::Error::new(
-                io::ErrorKind::PermissionDenied,
-                "arc unwrap failed".to_string(),
-            ));
-        }
-    };
-
-    loop {
-        let n = file.read(&mut buf)?;
-        if n == 0 {
-            break;
-        }
-        hasher.update(&buf[..n]);
-    }
-
-    Ok(hasher.finalize())
+fn first_message(uuid: Uuid) -> [u8; 17] {
+    let mut buf = [0u8; 17];
+    buf[0] = 10;
+    buf[1..].copy_from_slice(uuid.as_bytes());
+    buf
 }

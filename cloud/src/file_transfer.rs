@@ -1,10 +1,14 @@
 use crate::request::Request;
 use crate::request::RequestType;
+use crate::response;
 use crate::response::{Code, ErrorTransfer, TransferSuccess};
 use blake3::{Hash, Hasher};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
+use std::env::temp_dir;
+use std::fs;
 use std::fs::create_dir_all;
+use std::fs::read_dir;
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::io::{BufReader, Error};
@@ -75,40 +79,11 @@ impl Transfer {
     }
 }
 
-fn recieve_chunk(contents: Vec<u8>, file: &Arc<TransferedFile>) -> Result<usize, ErrorTransfer> {
-    println!("contents: {:?}", &contents[0..20]);
-    let mut id_b = [0; 8];
-    for i in 0..8 {
-        id_b[i] = contents[i + 1];
-    }
-    let chunk_id = u64::from_be_bytes(id_b);
-    let mut size_b = [0; 2];
-    size_b[0] = contents[9];
-    size_b[1] = contents[10];
-    let chunk_size = u16::from_be_bytes(size_b);
-    println!("chunk_size: {}", chunk_size);
-    let mut trimed: Vec<u8> = Vec::new();
-    for i in 0..chunk_size {
-        trimed.push(contents[(i + 11) as usize])
-    }
-    println!("chunk_id: {chunk_id}");
-    let location = chunk_id * (CHUNK_SIZE - OVERHEAD) as u64;
-    match file.file.write_at(&trimed[..], location) {
-        Ok(_) => Ok(chunk_id as usize),
-        Err(y) => {
-            eprintln!("{y}");
-            Err(ErrorTransfer::InternalServerError)
-        }
-    }
-}
-
-fn init_transfer(req: Request) -> Result<TransferedFile, ErrorTransfer> {
-    let mut uuid_bytes: [u8; 16] = [0; 16];
-    for i in 0..=15 {
-        uuid_bytes[i] = req.contents[i];
-    }
-    let name_len = req.contents[23] as usize;
-    let file_name = String::from_utf8_lossy(&req.contents[24..24 + name_len]).to_string();
+pub fn reinitialize(mut stream: TcpStream, first_message: [u8; CHUNK_SIZE], max_workers: usize) {
+    println!("reinitialization called");
+    let uuid = Uuid::from_bytes(first_message[1..=16].try_into().unwrap());
+    println!("uuid: {:?}", uuid);
+    let mut files: Vec<PathBuf> = Vec::new();
 
     let temp_location = Path::new(TEMP_FOLDER_LOCATION);
     let stor_location = Path::new(STORAGE_FOLDER_LOCATION);
@@ -121,88 +96,116 @@ fn init_transfer(req: Request) -> Result<TransferedFile, ErrorTransfer> {
         create_dir_all(stor_location);
     }
 
-    let file_path = format!("{TEMP_FOLDER_LOCATION}/{}", file_name);
-    let storage_file_path = format!("{STORAGE_FOLDER_LOCATION}/{}", file_name);
-    let config_file_path = format!("{}.config", file_path);
+    find_temp_files(temp_location, &mut files);
 
-    let path = Path::new(&file_path);
-    let storage_path = Path::new(&storage_file_path);
-    let config_path = Path::new(&config_file_path);
+    let file: Option<&PathBuf> = files.iter().find(|path| {
+        let contents = fs::read_to_string(path).unwrap();
+        let config: ConfigFile = serde_json::from_str(&contents).unwrap();
+        config.uuid == uuid
+    });
 
-    if path.exists() || storage_path.exists() || config_path.exists() {
-        return Err(ErrorTransfer::ThisFileExists);
-    }
-    let file = match File::create(path) {
-        Ok(val) => val,
-        Err(y) => {
-            println!("{:?}", y);
-            return Err(ErrorTransfer::InternalServerError);
+    let existing_path = match file {
+        Some(p) => p,
+        None => {
+            panic!() //todo
         }
     };
-    println!("size bytes: {:?}", &req.contents[16..=22]);
-    Ok(TransferedFile {
-        file_size_chunks: match decode_size(&req.contents[16..=22]) {
-            Ok(val) => val.div_ceil(CHUNK_SIZE - OVERHEAD),
-            Err(err) => {
-                return Err(err);
-            }
-        },
+
+    let contents = fs::read_to_string(existing_path).unwrap();
+    let config_file: ConfigFile = serde_json::from_str(&contents).unwrap();
+
+    let file_name = existing_path.file_stem().unwrap();
+
+    let temp_at = temp_location.join(file_name);
+
+    let file = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .open(Path::new(&temp_at))
+        .unwrap();
+
+    let transfered_file = Arc::new(TransferedFile {
+        file_size_chunks: config_file.file_size_chunks,
         file: Arc::new(file),
-        temp_path: path.to_path_buf(),
-        storage_path: storage_path.to_path_buf(),
-        config_path: Mutex::new(config_path.to_path_buf()),
-        uuid: Uuid::from_bytes_le(uuid_bytes),
-    })
+        temp_path: temp_at.to_path_buf(),
+        storage_path: temp_to_storage(temp_at.as_path()).unwrap(),
+        config_path: Mutex::new(existing_path.to_path_buf()),
+        uuid,
+    });
+
+    stream.write_all(response::TransferSuccess::Ok.respond(Vec::new()).as_slice());
+
+    // Reinitialized, initializing workers
+
+    let transfer = Arc::new(Mutex::new(Transfer::new(max_workers)));
+
+    {
+        let mut transf = transfer.lock().unwrap();
+        config_file.transfered_chunks.iter().for_each(|chunk_id| {
+            transf.chunk_log.insert(*chunk_id);
+        });
+    }
+
+    // WORKERS
+    let handles = init_workers_reciever(max_workers, &transfer, &transfered_file);
+
+    //READER
+    println!("reader initialized");
+    let tran = Arc::clone(&transfer);
+    stream.set_nonblocking(true).unwrap();
+
+    init_stream_reader(&mut stream, &tran, &transfered_file);
+
+    println!("loop broken");
+    handles
+        .into_iter()
+        .for_each(|handle| handle.join().unwrap());
+
+    let mut ready_buf = [21u8; 1];
+    stream.write_all(&mut ready_buf).unwrap();
+
+    println!("sent {:?}", ready_buf);
+
+    println!("awaiting hash confirmation");
+
+    execute_final_completion_check(&mut stream, &transfered_file);
+
+    std::fs::copy(&transfered_file.temp_path, &transfered_file.storage_path).unwrap();
+    std::fs::remove_file(&transfered_file.temp_path).unwrap();
+    let cfg_path = transfered_file.config_path.lock().unwrap().clone();
+    std::fs::remove_file(&cfg_path).unwrap();
 }
 
-fn handle_init(req: Request) -> Result<TransferedFile, ErrorTransfer> {
-    match req.request_type {
-        RequestType::Init => {
-            let fil = init_transfer(req);
-            fil
+fn temp_to_storage(temp_path: &Path) -> Option<PathBuf> {
+    let relative = temp_path.strip_prefix("./temp").ok()?;
+    Some(Path::new("./storage").join(relative))
+}
+
+fn find_temp_files(dir: &Path, results: &mut Vec<PathBuf>) -> std::io::Result<()> {
+    for entry in read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+
+        if path.is_dir() {
+            find_temp_files(&path, results)?;
+        } else if path.extension().map_or(false, |ext| ext == "config") {
+            results.push(path);
         }
-        _ => Err(ErrorTransfer::NotInitialized),
     }
+    Ok(())
 }
 
 pub fn recieve(mut stream: TcpStream, init_message: [u8; CHUNK_SIZE], max_workers: usize) {
     let mut file: Option<TransferedFile> = None;
     let transfer = Arc::new(Mutex::new(Transfer::new(max_workers)));
-    let req = match Request::decipher(init_message) {
-        Ok(x) => {
-            println!("deciphered: {:?}", x);
-            x
-        }
-        Err(y) => {
-            println!("deciphered: {:?}", y);
-            let mut buf = [0; 128];
-            buf[0] = y.get_code();
-            for (index, byte) in y.get_message().into_iter().enumerate() {
-                buf[index + 1] = byte
-            }
-            let _ = stream.write_all(&buf);
-            return ();
-        }
-    };
-    match handle_init(req) {
-        Ok(init) => {
-            file = Some(init);
-            let mut buf = [0; 32];
-            buf[0] = TransferSuccess::Ok.get_code();
-            for (index, byte) in TransferSuccess::Ok.get_message().into_iter().enumerate() {
-                buf[index + 1] = byte
-            }
-            let _ = stream.write_all(&buf);
-        }
-        Err(y) => {
-            let mut buf = [0; 128];
-            buf[0] = y.get_code();
-            for (index, byte) in y.get_message().into_iter().enumerate() {
-                buf[index + 1] = byte
-            }
-            let _ = stream.write_all(&buf);
-        }
-    };
+
+    file = Some(init_transfer(init_message).unwrap());
+    let mut buf = [0; 32];
+    buf[0] = TransferSuccess::Ok.get_code();
+    for (index, byte) in TransferSuccess::Ok.get_message().into_iter().enumerate() {
+        buf[index + 1] = byte
+    }
+    let _ = stream.write_all(&buf);
     let lock_file = Arc::new(file.unwrap());
 
     setup_config(&lock_file);
@@ -235,6 +238,59 @@ pub fn recieve(mut stream: TcpStream, init_message: [u8; CHUNK_SIZE], max_worker
     std::fs::remove_file(&lock_file.temp_path).unwrap();
     let cfg_path = lock_file.config_path.lock().unwrap().clone();
     std::fs::remove_file(&cfg_path).unwrap();
+}
+
+fn init_transfer(init_message: [u8; CHUNK_SIZE]) -> Result<TransferedFile, ErrorTransfer> {
+    let mut uuid_bytes: [u8; 16] = [0; 16];
+    for i in 0..=15 {
+        uuid_bytes[i] = init_message[i + 1];
+    }
+    let name_len = init_message[24] as usize;
+    let file_name = String::from_utf8_lossy(&init_message[25..25 + name_len]).to_string();
+
+    let temp_location = Path::new(TEMP_FOLDER_LOCATION);
+    let stor_location = Path::new(STORAGE_FOLDER_LOCATION);
+
+    if !temp_location.exists() {
+        create_dir_all(temp_location);
+    }
+
+    if !stor_location.exists() {
+        create_dir_all(stor_location);
+    }
+
+    let file_path = format!("{TEMP_FOLDER_LOCATION}/{}", file_name);
+    let storage_file_path = format!("{STORAGE_FOLDER_LOCATION}/{}", file_name);
+    let config_file_path = format!("{}.config", file_path);
+
+    let path = Path::new(&file_path);
+    let storage_path = Path::new(&storage_file_path);
+    let config_path = Path::new(&config_file_path);
+
+    if path.exists() || storage_path.exists() || config_path.exists() {
+        return Err(ErrorTransfer::ThisFileExists);
+    }
+    let file = match File::create(path) {
+        Ok(val) => val,
+        Err(y) => {
+            println!("{:?}", y);
+            return Err(ErrorTransfer::InternalServerError);
+        }
+    };
+    println!("size bytes: {:?}", &init_message[17..=23]);
+    Ok(TransferedFile {
+        file_size_chunks: match decode_size(&init_message[17..=23]) {
+            Ok(val) => val.div_ceil(CHUNK_SIZE - OVERHEAD),
+            Err(err) => {
+                return Err(err);
+            }
+        },
+        file: Arc::new(file),
+        temp_path: path.to_path_buf(),
+        storage_path: storage_path.to_path_buf(),
+        config_path: Mutex::new(config_path.to_path_buf()),
+        uuid: Uuid::from_bytes_le(uuid_bytes),
+    })
 }
 
 fn setup_config(lock_file: &Arc<TransferedFile>) -> Result<(), Error> {
@@ -335,6 +391,33 @@ fn init_workers_reciever(
         }));
     }
     handles
+}
+
+fn recieve_chunk(contents: Vec<u8>, file: &Arc<TransferedFile>) -> Result<usize, ErrorTransfer> {
+    println!("contents: {:?}", &contents[0..20]);
+    let mut id_b = [0; 8];
+    for i in 0..8 {
+        id_b[i] = contents[i + 1];
+    }
+    let chunk_id = u64::from_be_bytes(id_b);
+    let mut size_b = [0; 2];
+    size_b[0] = contents[9];
+    size_b[1] = contents[10];
+    let chunk_size = u16::from_be_bytes(size_b);
+    println!("chunk_size: {}", chunk_size);
+    let mut trimed: Vec<u8> = Vec::new();
+    for i in 0..chunk_size {
+        trimed.push(contents[(i + 11) as usize])
+    }
+    println!("chunk_id: {chunk_id}");
+    let location = chunk_id * (CHUNK_SIZE - OVERHEAD) as u64;
+    match file.file.write_at(&trimed[..], location) {
+        Ok(_) => Ok(chunk_id as usize),
+        Err(y) => {
+            eprintln!("{y}");
+            Err(ErrorTransfer::InternalServerError)
+        }
+    }
 }
 
 fn init_stream_reader(

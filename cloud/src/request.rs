@@ -7,9 +7,13 @@ pub enum RequestType {
     //uuid of transfer ([1..16]); file size ([16..23]); file name size [23], file name (24..)
     Init,
     //index of chunk ([1..16]); chunk size ([16..18]); chunk ([18..])
+    Reinit,
+    //uuid of reinit transfer ([1..16])
     ChunkTransfer,
     //0
     Disconnect,
+    CompletionCheck,
+    Verification,
     Unknown,
 }
 
@@ -18,7 +22,10 @@ impl RequestType {
         match code {
             0 => Self::Disconnect,
             1 => Self::Init,
+            10 => Self::Reinit,
             2 => Self::ChunkTransfer,
+            3 => Self::CompletionCheck,
+            4 => Self::Verification,
             _ => Self::Unknown,
         }
     }
