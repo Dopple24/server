@@ -1,3 +1,4 @@
+use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
     fs::File,
@@ -13,7 +14,25 @@ use uuid::Uuid;
 
 use crate::{CHUNK_SIZE, MAX_THREADS, OVERHEAD, hash_file, send_chunk};
 
-pub fn reinit(mut stream: TcpStream, uuid: Uuid, filename: &str) -> std::io::Result<()> {
+#[derive(Deserialize, Serialize, Debug)]
+pub struct Parts {
+    pub send: Vec<PartSend>,
+    pub acc: Vec<PartAcc>,
+}
+
+#[derive(Deserialize, Serialize, Debug)]
+pub struct PartSend {
+    pub uuid: Uuid,
+    pub filename: String,
+}
+
+#[derive(Deserialize, Serialize, Debug)]
+pub struct PartAcc {
+    pub path: String,
+    pub server_path: String,
+}
+
+pub fn reinit(mut stream: TcpStream, uuid: &Uuid, filename: &str) -> std::io::Result<()> {
     let file_size = crate::get_file_size(Path::new(filename)).unwrap();
     stream.write_all(&first_message(uuid))?;
     let mut buf = [0u8; CHUNK_SIZE];
@@ -262,7 +281,7 @@ pub fn reinit(mut stream: TcpStream, uuid: Uuid, filename: &str) -> std::io::Res
     Ok(())
 }
 
-fn first_message(uuid: Uuid) -> [u8; 17] {
+fn first_message(uuid: &Uuid) -> [u8; 17] {
     let mut buf = [0u8; 17];
     buf[0] = 10;
     buf[1..].copy_from_slice(uuid.as_bytes());

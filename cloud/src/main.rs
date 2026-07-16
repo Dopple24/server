@@ -2,6 +2,7 @@ use router::handle_client;
 use std::net::TcpListener;
 
 mod file_transfer;
+mod get_file;
 mod request;
 mod response;
 mod router;

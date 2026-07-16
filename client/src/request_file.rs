@@ -1,7 +1,3 @@
-use crate::request::Request;
-use crate::request::RequestType;
-use crate::response;
-use crate::response::{Code, ErrorTransfer, TransferSuccess};
 use blake3::{Hash, Hasher};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -23,6 +19,10 @@ use std::{
 };
 use uuid::Uuid;
 
+use crate::response::ErrorTransfer;
+use crate::response::TransferSuccess;
+use crate::response::{self, Code};
+
 pub const CHUNK_SIZE: usize = 32768;
 const OVERHEAD: usize = 11;
 const MAX_STORED: usize = 20;
@@ -32,7 +32,6 @@ const STORAGE_FOLDER_LOCATION: &str = "./storage";
 #[derive(Serialize, Deserialize)]
 struct ConfigFile {
     last_changed_at: u64,
-    uuid: Uuid,
     file_size_chunks: usize,
     transfered_chunks: HashSet<usize>,
     owner: Vec<Uuid>,
@@ -47,7 +46,6 @@ struct SendChunk {
 
 #[derive(Debug)]
 struct TransferedFile {
-    uuid: Uuid,
     file_size_chunks: usize,
     storage_path: PathBuf,
     temp_path: PathBuf,
@@ -78,10 +76,58 @@ impl Transfer {
     }
 }
 
-pub fn reinitialize(mut stream: TcpStream, first_message: [u8; CHUNK_SIZE], max_workers: usize) {
-    println!("reinitialization called");
-    let uuid = Uuid::from_bytes(first_message[1..=16].try_into().unwrap());
-    println!("uuid: {:?}", uuid);
+pub fn request(
+    mut stream: TcpStream,
+    path: &String,
+    max_workers: usize,
+    file_name: &str,
+) -> std::io::Result<()> {
+    let path_bytes = path.as_bytes();
+    let len = path_bytes.len();
+
+    if 5 + len > CHUNK_SIZE {
+        panic!()
+    }
+
+    let mut buf = [0u8; CHUNK_SIZE];
+    buf[0] = 5;
+    buf[1..5].copy_from_slice(&(len as u32).to_be_bytes());
+    buf[5..5 + len].copy_from_slice(path_bytes);
+    stream.write_all(&buf)?;
+    let mut buf = [0u8; 100];
+    let n = stream.read(&mut buf)?;
+    let chunks_len = u32::from_be_bytes(buf[0..4].try_into().unwrap());
+    println!("{:?}", chunks_len);
+
+    stream.write_all(&[20u8; 1]);
+
+    recieve(stream, path, max_workers, chunks_len as usize);
+    Ok(())
+}
+
+pub fn reinitialize(
+    mut stream: TcpStream,
+    path: &str,
+    server_path: &str,
+    max_workers: usize,
+) -> Result<(), Error> {
+    let path_bytes = server_path.as_bytes();
+    let len = path_bytes.len();
+
+    if 5 + len > CHUNK_SIZE {
+        panic!()
+    }
+
+    let mut buf = [0u8; CHUNK_SIZE];
+    buf[0] = 6;
+    buf[1..5].copy_from_slice(&(len as u32).to_be_bytes());
+    buf[5..5 + len].copy_from_slice(path_bytes);
+    stream.write_all(&buf)?;
+    let mut buf = [0u8; 100];
+    let n = stream.read(&mut buf)?;
+    let chunks_len = u32::from_be_bytes(buf[0..4].try_into().unwrap());
+    println!("{:?}", chunks_len);
+
     let mut files: Vec<PathBuf> = Vec::new();
 
     let temp_location = Path::new(TEMP_FOLDER_LOCATION);
@@ -89,26 +135,17 @@ pub fn reinitialize(mut stream: TcpStream, first_message: [u8; CHUNK_SIZE], max_
 
     if !temp_location.exists() {
         create_dir_all(temp_location);
+        return Err(Error::other("temp location didnt exist"));
     }
 
     if !stor_location.exists() {
         create_dir_all(stor_location);
+        return Err(Error::other("stor location didnt exist"));
     }
 
     find_temp_files(temp_location, &mut files);
 
-    let file: Option<&PathBuf> = files.iter().find(|path| {
-        let contents = fs::read_to_string(path).unwrap();
-        let config: ConfigFile = serde_json::from_str(&contents).unwrap();
-        config.uuid == uuid
-    });
-
-    let existing_path = match file {
-        Some(p) => p,
-        None => {
-            panic!() //todo
-        }
-    };
+    let existing_path = Path::new(path);
 
     let contents = fs::read_to_string(existing_path).unwrap();
     let config_file: ConfigFile = serde_json::from_str(&contents).unwrap();
@@ -129,10 +166,9 @@ pub fn reinitialize(mut stream: TcpStream, first_message: [u8; CHUNK_SIZE], max_
         temp_path: temp_at.to_path_buf(),
         storage_path: temp_to_storage(temp_at.as_path()).unwrap(),
         config_path: Mutex::new(existing_path.to_path_buf()),
-        uuid,
     });
 
-    stream.write_all(response::TransferSuccess::Ok.respond(Vec::new()).as_slice());
+    stream.write_all(&response::TransferSuccess::Ok.respond(Vec::new()).as_slice());
 
     // Reinitialized, initializing workers
 
@@ -173,6 +209,7 @@ pub fn reinitialize(mut stream: TcpStream, first_message: [u8; CHUNK_SIZE], max_
     std::fs::remove_file(&transfered_file.temp_path).unwrap();
     let cfg_path = transfered_file.config_path.lock().unwrap().clone();
     std::fs::remove_file(&cfg_path).unwrap();
+    Ok(())
 }
 
 fn temp_to_storage(temp_path: &Path) -> Option<PathBuf> {
@@ -194,11 +231,11 @@ fn find_temp_files(dir: &Path, results: &mut Vec<PathBuf>) -> std::io::Result<()
     Ok(())
 }
 
-pub fn recieve(mut stream: TcpStream, init_message: [u8; CHUNK_SIZE], max_workers: usize) {
+pub fn recieve(mut stream: TcpStream, path: &String, max_workers: usize, file_size_chunks: usize) {
     let mut file: Option<TransferedFile> = None;
     let transfer = Arc::new(Mutex::new(Transfer::new(max_workers)));
 
-    file = Some(init_transfer(init_message).unwrap());
+    file = Some(init_transfer(path, "test.txt", file_size_chunks).unwrap());
     let mut buf = [0; 32];
     buf[0] = TransferSuccess::Ok.get_code();
     for (index, byte) in TransferSuccess::Ok.get_message().into_iter().enumerate() {
@@ -239,14 +276,11 @@ pub fn recieve(mut stream: TcpStream, init_message: [u8; CHUNK_SIZE], max_worker
     std::fs::remove_file(&cfg_path).unwrap();
 }
 
-fn init_transfer(init_message: [u8; CHUNK_SIZE]) -> Result<TransferedFile, ErrorTransfer> {
-    let mut uuid_bytes: [u8; 16] = [0; 16];
-    for i in 0..=15 {
-        uuid_bytes[i] = init_message[i + 1];
-    }
-    let name_len = init_message[24] as usize;
-    let file_name = String::from_utf8_lossy(&init_message[25..25 + name_len]).to_string();
-
+fn init_transfer(
+    path: &String,
+    file_name: &str,
+    file_size_chunks: usize,
+) -> Result<TransferedFile, ErrorTransfer> {
     let temp_location = Path::new(TEMP_FOLDER_LOCATION);
     let stor_location = Path::new(STORAGE_FOLDER_LOCATION);
 
@@ -276,19 +310,12 @@ fn init_transfer(init_message: [u8; CHUNK_SIZE]) -> Result<TransferedFile, Error
             return Err(ErrorTransfer::InternalServerError);
         }
     };
-    println!("size bytes: {:?}", &init_message[17..=23]);
     Ok(TransferedFile {
-        file_size_chunks: match decode_size(&init_message[17..=23]) {
-            Ok(val) => val.div_ceil(CHUNK_SIZE - OVERHEAD),
-            Err(err) => {
-                return Err(err);
-            }
-        },
+        file_size_chunks,
         file: Arc::new(file),
         temp_path: path.to_path_buf(),
         storage_path: storage_path.to_path_buf(),
         config_path: Mutex::new(config_path.to_path_buf()),
-        uuid: Uuid::from_bytes_le(uuid_bytes),
     })
 }
 
@@ -304,7 +331,6 @@ fn setup_config(lock_file: &Arc<TransferedFile>) -> Result<(), Error> {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos() as u64,
-        uuid: lock_file.uuid,
         file_size_chunks: lock_file.file_size_chunks,
         transfered_chunks: HashSet::new(),
         is_public: false,  //is_public is todo!()

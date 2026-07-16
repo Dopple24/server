@@ -10,6 +10,8 @@ pub enum RequestType {
     Reinit,
     //uuid of reinit transfer ([1..16])
     ChunkTransfer,
+    GetFile,
+    ReinitGetFile,
     //0
     Disconnect,
     CompletionCheck,
@@ -26,6 +28,8 @@ impl RequestType {
             2 => Self::ChunkTransfer,
             3 => Self::CompletionCheck,
             4 => Self::Verification,
+            5 => Self::GetFile,
+            6 => Self::ReinitGetFile,
             _ => Self::Unknown,
         }
     }

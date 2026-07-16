@@ -1,4 +1,5 @@
-use crate::reinit::reinit;
+use crate::reinit::{Parts, reinit};
+use crate::request_file::{reinitialize, request};
 use blake3::{Hash, Hasher};
 use std::collections::HashMap;
 use std::env::args;
@@ -16,10 +17,14 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
 mod reinit;
+mod request_file;
+mod response;
 
 const CHUNK_SIZE: usize = 32768;
 const OVERHEAD: usize = 11;
 const MAX_THREADS: u64 = 5;
+const PARTS_PATH: &str = "./parts.json";
+const SOCKET: &str = "127.0.0.1:6543";
 
 #[derive(Debug)]
 enum TransferError {
@@ -31,8 +36,6 @@ enum TransferError {
 }
 
 fn main() -> std::io::Result<()> {
-    let mut stream = TcpStream::connect("127.0.0.1:6543")?;
-
     let args: Vec<String> = args().collect();
 
     if args.len() < 2 {
@@ -40,27 +43,61 @@ fn main() -> std::io::Result<()> {
         return Ok(());
     }
 
-    if args[1] == "--send" {
-        sending(stream)
-    } else if args[1] == "--reinit" {
-        if args.len() < 3 {
+    match args[1].as_str() {
+        "--send" => sending(TcpStream::connect(SOCKET)?),
+        "--reinit" => {
+            let parts = get_parts();
+            let part = &parts.send[0];
+            reinit(TcpStream::connect(SOCKET)?, &part.uuid, &part.filename)
+        }
+        "--get" => {
+            if args.len() < 3 {
+                println!("Please enter an arg with path e.g. --get ./storage/test.txt");
+                return Ok(());
+            }
+            request(TcpStream::connect(SOCKET)?, &args[2], 10, "test.txt")
+        }
+        "--get_reinit" => {
+            let parts = get_parts();
+            request_file::reinitialize(
+                TcpStream::connect(SOCKET)?,
+                &parts.acc[0].path,
+                &parts.acc[0].server_path,
+                10,
+            )
+        }
+        _ => {
             println!(
-                "Please enter an arg with uuid e.g. --reinit a960866d-9a8a-4b24-ba14-d9dbe266b69b"
+                "Please enter an arg. Either --send for sending or --reinit for reinitialization"
             );
             return Ok(());
         }
-        let uuid = Uuid::from_str(&args[2]);
-        match uuid {
-            Ok(u) => reinit(stream, u, "./test.txt"),
-            Err(_) => {
-                println!("Please enter a valid uuid");
-                Ok(())
-            }
-        }
-    } else {
-        println!("Please enter an arg. Either --send for sending or --reinit for reinitialization");
-        return Ok(());
     }
+}
+
+fn get_parts() -> Parts {
+    let mut file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .open(PARTS_PATH)
+        .unwrap();
+
+    let mut contents = String::new();
+    file.read_to_string(&mut contents).unwrap();
+
+    if contents.trim().is_empty() {
+        // File didn't exist / was empty — return a default and optionally seed the file
+        let default = Parts {
+            send: Vec::new(),
+            acc: Vec::new(),
+        };
+        let serialized = serde_json::to_string_pretty(&default).unwrap();
+        file.write_all(serialized.as_bytes()).unwrap();
+        return default;
+    }
+
+    serde_json::from_str(&contents).expect("Failed to parse JSON")
 }
 
 fn sending(mut stream: TcpStream) -> std::io::Result<()> {
