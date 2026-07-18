@@ -1,21 +1,21 @@
 use crate::reinit::{Parts, reinit};
-use crate::request_file::{reinitialize, request};
+use crate::request_file::request;
 use blake3::{Hash, Hasher};
 use std::collections::HashMap;
 use std::env::args;
 use std::fs::File;
 use std::fs::OpenOptions;
-use std::io::{self, Error, Read, Seek, SeekFrom, Write};
+use std::io::{self, Error, Read, Write};
 use std::net::TcpStream;
 use std::os::unix::fs::FileExt;
 use std::path::Path;
-use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
+mod get_map;
 mod reinit;
 mod request_file;
 mod response;
@@ -66,6 +66,7 @@ fn main() -> std::io::Result<()> {
                 10,
             )
         }
+        "--get_map" => get_map::get_map(TcpStream::connect(SOCKET)?),
         _ => {
             println!(
                 "Please enter an arg. Either --send for sending or --reinit for reinitialization"

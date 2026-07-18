@@ -1,3 +1,5 @@
+use crate::mapper::Fil;
+use crate::mapper::MapStore;
 use crate::request::Request;
 use crate::request::RequestType;
 use crate::response;
@@ -78,7 +80,12 @@ impl Transfer {
     }
 }
 
-pub fn reinitialize(mut stream: TcpStream, first_message: [u8; CHUNK_SIZE], max_workers: usize) {
+pub fn reinitialize(
+    mut stream: TcpStream,
+    first_message: [u8; CHUNK_SIZE],
+    max_workers: usize,
+    map_store: MapStore,
+) {
     println!("reinitialization called");
     let uuid = Uuid::from_bytes(first_message[1..=16].try_into().unwrap());
     println!("uuid: {:?}", uuid);
@@ -169,6 +176,24 @@ pub fn reinitialize(mut stream: TcpStream, first_message: [u8; CHUNK_SIZE], max_
 
     execute_final_completion_check(&mut stream, &transfered_file);
 
+    let mapped_file = Fil::new(
+        transfered_file
+            .storage_path
+            .file_name()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string(),
+        transfered_file.storage_path.to_path_buf(),
+        Uuid::new_v4(),
+        true,
+        true,
+        Vec::new(),
+        Vec::new(),
+    );
+
+    map_store.add_file(None, mapped_file);
+
     std::fs::copy(&transfered_file.temp_path, &transfered_file.storage_path).unwrap();
     std::fs::remove_file(&transfered_file.temp_path).unwrap();
     let cfg_path = transfered_file.config_path.lock().unwrap().clone();
@@ -194,7 +219,12 @@ fn find_temp_files(dir: &Path, results: &mut Vec<PathBuf>) -> std::io::Result<()
     Ok(())
 }
 
-pub fn recieve(mut stream: TcpStream, init_message: [u8; CHUNK_SIZE], max_workers: usize) {
+pub fn recieve(
+    mut stream: TcpStream,
+    init_message: [u8; CHUNK_SIZE],
+    max_workers: usize,
+    map_store: MapStore,
+) {
     let mut file: Option<TransferedFile> = None;
     let transfer = Arc::new(Mutex::new(Transfer::new(max_workers)));
 
@@ -232,6 +262,24 @@ pub fn recieve(mut stream: TcpStream, init_message: [u8; CHUNK_SIZE], max_worker
     println!("awaiting hash confirmation");
 
     execute_final_completion_check(&mut stream, &lock_file);
+
+    let mapped_file = Fil::new(
+        lock_file
+            .storage_path
+            .file_name()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string(),
+        lock_file.storage_path.to_path_buf(),
+        Uuid::new_v4(),
+        true,
+        true,
+        Vec::new(),
+        Vec::new(),
+    );
+
+    map_store.add_file(None, mapped_file);
 
     std::fs::copy(&lock_file.temp_path, &lock_file.storage_path).unwrap();
     std::fs::remove_file(&lock_file.temp_path).unwrap();

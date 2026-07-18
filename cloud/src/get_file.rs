@@ -13,6 +13,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use blake3::{Hash, Hasher};
 
 use crate::file_transfer::CHUNK_SIZE;
+use crate::mapper::MapStore;
 const OVERHEAD: usize = 11;
 
 #[derive(Debug)]
@@ -49,6 +50,7 @@ pub fn send_file(
     first_message: [u8; CHUNK_SIZE],
     max_workers: usize,
     buf_len: usize,
+    map_store: MapStore,
 ) {
     let query = Query::from_bytes(first_message, buf_len);
     let path = query.get_path();
@@ -85,6 +87,7 @@ pub fn reinit_send_file(
     first_message: [u8; CHUNK_SIZE],
     max_workers: usize,
     buf_len: usize,
+    map_store: MapStore,
 ) {
     let query = Query::from_bytes(first_message, buf_len);
     let path = query.get_path();

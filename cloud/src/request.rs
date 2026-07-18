@@ -16,6 +16,7 @@ pub enum RequestType {
     Disconnect,
     CompletionCheck,
     Verification,
+    GetMap,
     Unknown,
 }
 
@@ -30,6 +31,7 @@ impl RequestType {
             4 => Self::Verification,
             5 => Self::GetFile,
             6 => Self::ReinitGetFile,
+            9 => Self::GetMap,
             _ => Self::Unknown,
         }
     }
