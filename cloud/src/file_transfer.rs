@@ -31,7 +31,7 @@ const MAX_STORED: usize = 20;
 const TEMP_FOLDER_LOCATION: &str = "./temp";
 const STORAGE_FOLDER_LOCATION: &str = "./storage";
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Debug)]
 struct ConfigFile {
     last_changed_at: u64,
     uuid: Uuid,
@@ -85,9 +85,11 @@ pub fn reinitialize(
     first_message: [u8; CHUNK_SIZE],
     max_workers: usize,
     map_store: MapStore,
+    client_uuid: &Uuid,
+    offset: usize,
 ) {
     println!("reinitialization called");
-    let uuid = Uuid::from_bytes(first_message[1..=16].try_into().unwrap());
+    let uuid = Uuid::from_bytes(first_message[offset..16 + offset].try_into().unwrap());
     println!("uuid: {:?}", uuid);
     let mut files: Vec<PathBuf> = Vec::new();
 
@@ -107,6 +109,7 @@ pub fn reinitialize(
     let file: Option<&PathBuf> = files.iter().find(|path| {
         let contents = fs::read_to_string(path).unwrap();
         let config: ConfigFile = serde_json::from_str(&contents).unwrap();
+        println!("config: {:?}", config);
         config.uuid == uuid
     });
 
@@ -185,7 +188,7 @@ pub fn reinitialize(
             .unwrap()
             .to_string(),
         transfered_file.storage_path.to_path_buf(),
-        Uuid::new_v4(),
+        *client_uuid,
         true,
         true,
         Vec::new(),
@@ -224,11 +227,12 @@ pub fn recieve(
     init_message: [u8; CHUNK_SIZE],
     max_workers: usize,
     map_store: MapStore,
+    client_uuid: &Uuid,
+    offset: usize,
 ) {
-    let mut file: Option<TransferedFile> = None;
     let transfer = Arc::new(Mutex::new(Transfer::new(max_workers)));
 
-    file = Some(init_transfer(init_message).unwrap());
+    let file = Some(init_transfer(&init_message[offset - 1..]).unwrap());
     let mut buf = [0; 32];
     buf[0] = TransferSuccess::Ok.get_code();
     for (index, byte) in TransferSuccess::Ok.get_message().into_iter().enumerate() {
@@ -272,7 +276,7 @@ pub fn recieve(
             .unwrap()
             .to_string(),
         lock_file.storage_path.to_path_buf(),
-        Uuid::new_v4(),
+        *client_uuid,
         true,
         true,
         Vec::new(),
@@ -287,7 +291,7 @@ pub fn recieve(
     std::fs::remove_file(&cfg_path).unwrap();
 }
 
-fn init_transfer(init_message: [u8; CHUNK_SIZE]) -> Result<TransferedFile, ErrorTransfer> {
+fn init_transfer(init_message: &[u8]) -> Result<TransferedFile, ErrorTransfer> {
     let mut uuid_bytes: [u8; 16] = [0; 16];
     for i in 0..=15 {
         uuid_bytes[i] = init_message[i + 1];

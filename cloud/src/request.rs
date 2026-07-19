@@ -1,7 +1,7 @@
 use crate::file_transfer::CHUNK_SIZE;
 use crate::response::ErrorTransfer;
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub enum RequestType {
     //each request should have type ([0])
     //uuid of transfer ([1..16]); file size ([16..23]); file name size [23], file name (24..)
@@ -17,6 +17,7 @@ pub enum RequestType {
     CompletionCheck,
     Verification,
     GetMap,
+    Register,
     Unknown,
 }
 
@@ -31,6 +32,7 @@ impl RequestType {
             4 => Self::Verification,
             5 => Self::GetFile,
             6 => Self::ReinitGetFile,
+            8 => Self::Register,
             9 => Self::GetMap,
             _ => Self::Unknown,
         }

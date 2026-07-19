@@ -1,8 +1,14 @@
 use router::handle_client;
 use std::{net::TcpListener, path::Path};
 
+use argon2::{
+    Argon2, PasswordHash, PasswordHasher, PasswordVerifier,
+    password_hash::{SaltString, rand_core::OsRng},
+};
+
 use crate::mapper::MapStore;
 
+mod auth;
 mod file_transfer;
 mod get_file;
 mod get_map;
@@ -12,6 +18,7 @@ mod response;
 mod router;
 
 fn main() -> std::io::Result<()> {
+    dotenvy::dotenv().ok();
     let map_store = MapStore::load().unwrap();
 
     let listener = TcpListener::bind("127.0.0.1:6543")?;

@@ -14,6 +14,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use blake3::{Hash, Hasher};
 use uuid::Uuid;
 
+use crate::auth::login_api;
 use crate::file_transfer::CHUNK_SIZE;
 use crate::mapper::{Fil, MapStore};
 const OVERHEAD: usize = 11;
@@ -33,10 +34,10 @@ struct Query {
 }
 
 impl Query {
-    fn from_bytes(bytes: [u8; CHUNK_SIZE], buf_len: usize) -> Self {
+    fn from_bytes(bytes: &[u8], buf_len: usize) -> Option<Self> {
         debug_assert!(buf_len >= 1 && buf_len <= CHUNK_SIZE);
-        let uuid = Uuid::from_bytes(bytes[1..17].try_into().unwrap());
-        Query { file_uuid: uuid }
+        let file_uuid = Uuid::from_bytes(bytes[0..16].try_into().unwrap());
+        Some(Query { file_uuid })
     }
     fn get_path(&self, map: &MapStore, client_uuid: &Uuid) -> Result<PathBuf, TransferError> {
         match Fil::find_mut(&self.file_uuid, map, client_uuid) {
@@ -53,16 +54,35 @@ pub fn send_file(
     buf_len: usize,
     map_store: MapStore,
     client_uuid: &Uuid,
+    offset: usize,
 ) {
-    let query = Query::from_bytes(first_message, buf_len);
-    let path = query.get_path(&map_store, client_uuid).unwrap();
+    let query = match Query::from_bytes(&first_message[offset..], buf_len) {
+        Some(q) => q,
+        None => {
+            let buf = [48u8; 1];
+            stream.write_all(&buf);
+            return;
+        }
+    };
+    let path = match query.get_path(&map_store, client_uuid) {
+        Ok(p) => p,
+        Err(e) => {
+            println!("error: {:?}", e);
+            let buf = [48u8; 1];
+            stream.write_all(&buf);
+            return;
+        }
+    };
     println!("path: {:?}", path);
     let file_size = get_file_size(&path).unwrap();
     let chunks_len = get_chunks_len(file_size);
     let fil = Arc::new(File::open(&path).unwrap());
 
     println!("sending {:?}", chunks_len);
-    stream.write_all(&chunks_len.to_be_bytes()).unwrap();
+    let mut buf = [0u8; 5];
+    buf[0] = 20;
+    buf[1..5].copy_from_slice(&chunks_len.to_be_bytes());
+    stream.write_all(&buf).unwrap();
 
     let mut resp = [0u8; CHUNK_SIZE];
 
@@ -91,16 +111,35 @@ pub fn reinit_send_file(
     buf_len: usize,
     map_store: MapStore,
     client_uuid: &Uuid,
+    offset: usize,
 ) {
-    let query = Query::from_bytes(first_message, buf_len);
-    let path = query.get_path(&map_store, client_uuid).unwrap();
+    let query = match Query::from_bytes(&first_message[offset..], buf_len) {
+        Some(q) => q,
+        None => {
+            let buf = [48u8; 1];
+            stream.write_all(&buf);
+            return;
+        }
+    };
+    let path = match query.get_path(&map_store, client_uuid) {
+        Ok(p) => p,
+        Err(e) => {
+            println!("error: {:?}", e);
+            let buf = [48u8; 1];
+            stream.write_all(&buf);
+            return;
+        }
+    };
     println!("path: {:?}", path);
     let file_size = get_file_size(&path).unwrap();
     let chunks_len = get_chunks_len(file_size);
     let fil = Arc::new(File::open(&path).unwrap());
 
     println!("sending {:?}", chunks_len);
-    stream.write_all(&chunks_len.to_be_bytes()).unwrap();
+    let mut buf = [0u8; 5];
+    buf[0] = 20;
+    buf[1..5].copy_from_slice(&chunks_len.to_be_bytes());
+    stream.write_all(&buf).unwrap();
 
     let mut resp = [0u8; CHUNK_SIZE];
 

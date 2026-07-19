@@ -19,6 +19,7 @@ use std::{
 };
 use uuid::Uuid;
 
+use crate::reinit::first_message;
 use crate::response::ErrorTransfer;
 use crate::response::TransferSuccess;
 use crate::response::{self, Code};
@@ -76,16 +77,33 @@ impl Transfer {
     }
 }
 
-pub fn request(mut stream: TcpStream, max_workers: usize, file_uuid: &Uuid) -> std::io::Result<()> {
-    let mut buf = [0u8; 17];
-    buf[0] = 5;
-    buf[1..17].copy_from_slice(&file_uuid.into_bytes());
-    stream.write_all(&buf)?;
+pub fn request(
+    mut stream: TcpStream,
+    max_workers: usize,
+    username: &str,
+    password: &str,
+    file_uuid: &Uuid,
+) -> std::io::Result<()> {
+    stream.write_all(&first_message(5, file_uuid, username, password))?;
 
     let mut buf = [0u8; 100];
     stream.read(&mut buf)?;
-    let chunks_len = u32::from_be_bytes(buf[0..4].try_into().unwrap());
-    println!("{:?}", chunks_len);
+
+    if buf[0] != 20 {
+        match buf[0] {
+            48 => {
+                eprintln!("forbiden");
+                return Err(Error::last_os_error());
+            }
+            e => {
+                eprintln!("failed: {:?}", e);
+                return Err(Error::last_os_error());
+            }
+        }
+    }
+
+    let chunks_len = u32::from_be_bytes(buf[1..5].try_into().unwrap());
+    println!("chunks len: {:?}", chunks_len);
 
     stream.write_all(&[20u8; 1]);
 
@@ -97,17 +115,30 @@ pub fn reinitialize(
     mut stream: TcpStream,
     path: &str,
     max_workers: usize,
+    username: &str,
+    password: &str,
     file_uuid: &Uuid,
 ) -> Result<(), Error> {
-    let mut buf = [0u8; 17];
-    buf[0] = 5;
-    buf[1..17].copy_from_slice(&file_uuid.into_bytes());
-    stream.write_all(&buf)?;
+    stream.write_all(&first_message(5, file_uuid, username, password))?;
 
     let mut buf = [0u8; 100];
     stream.read(&mut buf)?;
-    let chunks_len = u32::from_be_bytes(buf[0..4].try_into().unwrap());
-    println!("{:?}", chunks_len);
+
+    if buf[0] != 20 {
+        match buf[0] {
+            48 => {
+                eprintln!("forbiden");
+                return Err(Error::last_os_error());
+            }
+            e => {
+                eprintln!("failed: {:?}", e);
+                return Err(Error::last_os_error());
+            }
+        }
+    }
+
+    let chunks_len = u32::from_be_bytes(buf[1..5].try_into().unwrap());
+    println!("chunks len: {:?}", chunks_len);
 
     let mut files: Vec<PathBuf> = Vec::new();
 

@@ -16,6 +16,7 @@ use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
+mod auth;
 mod get_map;
 mod reinit;
 mod request_file;
@@ -40,26 +41,38 @@ fn main() -> std::io::Result<()> {
     let args: Vec<String> = args().collect();
 
     if args.len() < 2 {
-        println!("Please enter an arg. Either --send for sending or --reinit for reinitialization");
+        println!(
+            "Please enter an arg. Either --send for sending or --reinit for reinitialization, login and password must be included too"
+        );
         return Ok(());
     }
 
     match args[1].as_str() {
-        "--send" => sending(TcpStream::connect(SOCKET)?),
+        "--send" => sending(TcpStream::connect(SOCKET)?, &args[2], &args[3]),
         "--reinit" => {
             let parts = get_parts();
             let part = &parts.send[0];
-            reinit(TcpStream::connect(SOCKET)?, &part.uuid, &part.filename)
+            reinit(
+                TcpStream::connect(SOCKET)?,
+                &part.uuid,
+                &part.filename,
+                &args[2],
+                &args[3],
+            )
         }
         "--get" => {
-            if args.len() < 3 {
-                println!("Please enter an arg with uuid e.g. --get **valid uuid**");
+            if args.len() < 5 {
+                println!(
+                    "Please enter an arg with uuid e.g. --get username password **valid uuid**"
+                );
                 return Ok(());
             }
             request(
                 TcpStream::connect(SOCKET)?,
                 10,
-                &Uuid::from_str(&args[2]).expect("provide a valid uuid"),
+                &args[2],
+                &args[3],
+                &Uuid::from_str(&args[4]).expect("provide a valid uuid"),
             )
         }
         "--get_reinit" => {
@@ -68,10 +81,27 @@ fn main() -> std::io::Result<()> {
                 TcpStream::connect(SOCKET)?,
                 &parts.acc[0].path,
                 10,
+                &args[2],
+                &args[3],
                 &Uuid::from_str(&parts.acc[0].server_uuid).expect("invalid uuid stored in parts"),
             )
         }
-        "--get_map" => get_map::get_map(TcpStream::connect(SOCKET)?),
+        "--get_map" => get_map::get_map(TcpStream::connect(SOCKET)?, &args[2], &args[3]),
+        "--register" => {
+            if args.len() < 5 {
+                println!(
+                    "Please enter an arg with uuid e.g. --register username password admin_password"
+                );
+                return Ok(());
+            }
+            match auth::register(TcpStream::connect(SOCKET)?, &args[2], &args[3], &args[4]) {
+                Ok(_) => Ok(()),
+                Err(y) => {
+                    eprintln!("registration failed {:?}", y);
+                    Err(Error::last_os_error())
+                }
+            }
+        }
         _ => {
             println!(
                 "Please enter an arg. Either --send for sending or --reinit for reinitialization"
@@ -106,9 +136,15 @@ fn get_parts() -> Parts {
     serde_json::from_str(&contents).expect("Failed to parse JSON")
 }
 
-fn sending(mut stream: TcpStream) -> std::io::Result<()> {
+fn sending(mut stream: TcpStream, username: &str, password: &str) -> std::io::Result<()> {
     let file_size = get_file_size(Path::new("./test.txt")).unwrap();
-    let resp = send(&mut stream, file_size, "test.txt".as_bytes())?;
+    let resp = send(
+        &mut stream,
+        file_size,
+        "test.txt".as_bytes(),
+        username,
+        password,
+    )?;
     println!("response code: {:?}", &resp.clone()[0]);
     println!("response: {}", String::from_utf8_lossy(&resp[1..]));
 
@@ -391,7 +427,13 @@ fn encode_file_size(mut value: u64) -> [u8; 7] {
     out
 }
 
-fn send(stream: &mut TcpStream, data: u64, file_name: &[u8]) -> Result<[u8; 128], Error> {
+fn send(
+    stream: &mut TcpStream,
+    data: u64,
+    file_name: &[u8],
+    username: &str,
+    password: &str,
+) -> Result<[u8; 128], Error> {
     let transfer_uuid = Uuid::new_v4();
     let file_size = data;
 
@@ -399,8 +441,16 @@ fn send(stream: &mut TcpStream, data: u64, file_name: &[u8]) -> Result<[u8; 128]
 
     let size = encode_file_size(file_size);
 
-    let mut buffer = Vec::with_capacity(24);
+    let mut buffer = Vec::new();
     buffer.extend_from_slice(&[1]);
+
+    let username_bytes = &username.as_bytes();
+    buffer.extend_from_slice(&[username_bytes.len() as u8]);
+    buffer.extend_from_slice(username_bytes);
+
+    let password_bytes = &password.as_bytes();
+    buffer.extend_from_slice(&[password_bytes.len() as u8]);
+    buffer.extend_from_slice(password_bytes);
     buffer.extend_from_slice(&transfer_uuid.to_bytes_le());
     buffer.extend_from_slice(&size);
     buffer.extend_from_slice(&[file_name.len() as u8]);

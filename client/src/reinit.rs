@@ -32,9 +32,15 @@ pub struct PartAcc {
     pub server_uuid: String,
 }
 
-pub fn reinit(mut stream: TcpStream, uuid: &Uuid, filename: &str) -> std::io::Result<()> {
+pub fn reinit(
+    mut stream: TcpStream,
+    uuid: &Uuid,
+    filename: &str,
+    username: &str,
+    password: &str,
+) -> std::io::Result<()> {
     let file_size = crate::get_file_size(Path::new(filename)).unwrap();
-    stream.write_all(&first_message(uuid))?;
+    stream.write_all(&first_message(10, uuid, username, password))?;
     let mut buf = [0u8; CHUNK_SIZE];
     stream.read(&mut buf)?;
     println!("buf: {}", buf[0]);
@@ -281,9 +287,37 @@ pub fn reinit(mut stream: TcpStream, uuid: &Uuid, filename: &str) -> std::io::Re
     Ok(())
 }
 
-fn first_message(uuid: &Uuid) -> [u8; 17] {
-    let mut buf = [0u8; 17];
-    buf[0] = 10;
-    buf[1..].copy_from_slice(uuid.as_bytes());
+pub fn first_message(
+    message_code: u8,
+    uuid: &Uuid,
+    username: &str,
+    password: &str,
+) -> [u8; CHUNK_SIZE] {
+    let username_bytes = username.as_bytes();
+    let password_bytes = password.as_bytes();
+
+    if username_bytes.len() > 255 || password_bytes.len() > 255 {
+        panic!()
+    }
+
+    let username_start = 2;
+    let username_end = username_start + username_bytes.len();
+    let password_start = username_end + 1;
+    let password_end = password_start + password_bytes.len();
+    let uuid_start = password_end;
+    let uuid_end = uuid_start + 16; // UUID is always exactly 16 bytes
+
+    if uuid_end > CHUNK_SIZE {
+        panic!()
+    }
+
+    let mut buf = [0u8; CHUNK_SIZE];
+    buf[0] = message_code;
+    buf[1] = username_bytes.len() as u8;
+    buf[username_start..username_end].copy_from_slice(username_bytes);
+    buf[username_end] = password_bytes.len() as u8;
+    buf[password_start..password_end].copy_from_slice(password_bytes);
+    buf[uuid_start..uuid_end].copy_from_slice(uuid.as_bytes());
+
     buf
 }
