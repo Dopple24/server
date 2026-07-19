@@ -9,6 +9,7 @@ use std::io::{self, Error, Read, Write};
 use std::net::TcpStream;
 use std::os::unix::fs::FileExt;
 use std::path::Path;
+use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
@@ -52,18 +53,22 @@ fn main() -> std::io::Result<()> {
         }
         "--get" => {
             if args.len() < 3 {
-                println!("Please enter an arg with path e.g. --get ./storage/test.txt");
+                println!("Please enter an arg with uuid e.g. --get **valid uuid**");
                 return Ok(());
             }
-            request(TcpStream::connect(SOCKET)?, &args[2], 10, "test.txt")
+            request(
+                TcpStream::connect(SOCKET)?,
+                10,
+                &Uuid::from_str(&args[2]).expect("provide a valid uuid"),
+            )
         }
         "--get_reinit" => {
             let parts = get_parts();
             request_file::reinitialize(
                 TcpStream::connect(SOCKET)?,
                 &parts.acc[0].path,
-                &parts.acc[0].server_path,
                 10,
+                &Uuid::from_str(&parts.acc[0].server_uuid).expect("invalid uuid stored in parts"),
             )
         }
         "--get_map" => get_map::get_map(TcpStream::connect(SOCKET)?),

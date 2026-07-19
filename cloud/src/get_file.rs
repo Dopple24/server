@@ -2,46 +2,47 @@ use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Write};
+use std::iter::Map;
 use std::net::TcpStream;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::FileExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, Thread};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use blake3::{Hash, Hasher};
+use uuid::Uuid;
 
 use crate::file_transfer::CHUNK_SIZE;
-use crate::mapper::MapStore;
+use crate::mapper::{Fil, MapStore};
 const OVERHEAD: usize = 11;
 
 #[derive(Debug)]
-enum TransferError {
+pub enum TransferError {
     InvalidLength,
     InvalidUuid,
     Overflow,
     FileNotFound,
     MetadataNotFound,
+    Forbidden,
 }
 
 struct Query {
-    len: u32,
-    path: Vec<u8>,
+    file_uuid: Uuid,
 }
 
 impl Query {
     fn from_bytes(bytes: [u8; CHUNK_SIZE], buf_len: usize) -> Self {
         debug_assert!(buf_len >= 1 && buf_len <= CHUNK_SIZE);
-        let len = u32::from_be_bytes(bytes[1..5].try_into().unwrap());
-        println!("{:?}", len);
-        Query {
-            len,
-            path: bytes[5..5 + len as usize].to_vec(),
-        }
+        let uuid = Uuid::from_bytes(bytes[1..17].try_into().unwrap());
+        Query { file_uuid: uuid }
     }
-    fn get_path(&self) -> &Path {
-        Path::new(OsStr::from_bytes(&self.path))
+    fn get_path(&self, map: &MapStore, client_uuid: &Uuid) -> Result<PathBuf, TransferError> {
+        match Fil::find_mut(&self.file_uuid, map, client_uuid) {
+            Ok(fil) => Ok(fil.path),
+            Err(e) => Err(e),
+        }
     }
 }
 
@@ -51,9 +52,10 @@ pub fn send_file(
     max_workers: usize,
     buf_len: usize,
     map_store: MapStore,
+    client_uuid: &Uuid,
 ) {
     let query = Query::from_bytes(first_message, buf_len);
-    let path = query.get_path();
+    let path = query.get_path(&map_store, client_uuid).unwrap();
     println!("path: {:?}", path);
     let file_size = get_file_size(&path).unwrap();
     let chunks_len = get_chunks_len(file_size);
@@ -88,9 +90,10 @@ pub fn reinit_send_file(
     max_workers: usize,
     buf_len: usize,
     map_store: MapStore,
+    client_uuid: &Uuid,
 ) {
     let query = Query::from_bytes(first_message, buf_len);
-    let path = query.get_path();
+    let path = query.get_path(&map_store, client_uuid).unwrap();
     println!("path: {:?}", path);
     let file_size = get_file_size(&path).unwrap();
     let chunks_len = get_chunks_len(file_size);
@@ -202,17 +205,37 @@ fn workers_send(
         };
     }
 
+    let mut stream = arc_stream.lock().unwrap();
+
+    loop {
+        let mut buf = [0u8; 1];
+        match stream.read_exact(&mut buf) {
+            Ok(_) => match buf[0] {
+                21 => {
+                    println!("client ready");
+                    break;
+                }
+                val => {
+                    println!("44 header: {} not found", val);
+                }
+            },
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+            Err(_) => {
+                println!("44 header: {} not found", buf[0]);
+            }
+        };
+    }
+
     let mut file_hash_buf: [u8; 32] = hash_file(fil).unwrap().try_into().unwrap();
     let mut buf = vec![0u8; 33];
     buf[1..].copy_from_slice(&mut file_hash_buf);
     buf[0] = 4;
 
-    let mut stream = arc_stream.lock().unwrap();
-
     stream.write_all(&buf).unwrap();
 
     println!("sent {:?}", buf);
 
+    let mut attempts = 1;
     loop {
         let mut buf = [0u8; 1];
         match stream.read_exact(&mut buf) {
@@ -220,6 +243,15 @@ fn workers_send(
                 24 => {
                     println!("success");
                     break;
+                }
+                44 => {
+                    println!("44 header: {} not found", 44);
+                    if attempts < 5 {
+                        println!("trying to send a completion check again, attempt: {attempts}");
+                        stream.write_all(&file_hash_buf).unwrap();
+                        println!("sent: {:?}", &file_hash_buf);
+                        attempts += 1;
+                    }
                 }
                 val => {
                     println!("44 header: {} not found", val);

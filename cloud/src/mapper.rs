@@ -1,3 +1,4 @@
+use crate::get_file::TransferError;
 use chrono::{DateTime, Local, Utc};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -31,15 +32,15 @@ impl AccessControl {
         }
     }
 
-    pub fn can_view(&self, user: Uuid) -> bool {
+    pub fn can_view(&self, user: &Uuid) -> bool {
         self.is_public_for_viewing
-            || self.owner == user
+            || &self.owner == user
             || self.is_visible_for.contains(&user)
             || self.can_edit(user)
     }
 
-    pub fn can_edit(&self, user: Uuid) -> bool {
-        self.is_public_for_changing || self.owner == user || self.is_editable_for.contains(&user)
+    pub fn can_edit(&self, user: &Uuid) -> bool {
+        self.is_public_for_changing || &self.owner == user || self.is_editable_for.contains(&user)
     }
 }
 
@@ -51,6 +52,7 @@ pub struct Folder {
     pub folders: Vec<Folder>,
     pub files: Vec<Fil>,
     pub path: PathBuf,
+    pub is_locked: bool,
     #[serde(flatten)]
     pub access: AccessControl,
 }
@@ -61,6 +63,7 @@ pub struct Fil {
     pub last_changed_at: DateTime<Utc>,
     pub uuid: Uuid,
     pub path: PathBuf,
+    pub is_locked: bool,
     #[serde(flatten)]
     pub access: AccessControl,
 }
@@ -80,6 +83,7 @@ impl Fil {
             last_changed_at: Local::now().to_utc(),
             uuid: Uuid::new_v4(),
             path,
+            is_locked: false,
             access: AccessControl {
                 owner,
                 is_public_for_viewing,
@@ -87,6 +91,25 @@ impl Fil {
                 is_visible_for,
                 is_editable_for,
             },
+        }
+    }
+    pub fn find_mut(
+        target: &Uuid,
+        map: &MapStore,
+        client_uuid: &Uuid,
+    ) -> Result<Fil, TransferError> {
+        let guard = map.inner.read().unwrap();
+        let files = guard.list_files();
+        let fil = files.iter().find(|fil| &fil.uuid == target);
+        match fil {
+            None => return Err(TransferError::FileNotFound),
+            Some(f) => {
+                if f.access.can_view(client_uuid) {
+                    Ok(f.clone())
+                } else {
+                    Err(TransferError::Forbidden)
+                }
+            }
         }
     }
 }
@@ -115,6 +138,7 @@ impl Folder {
                     last_changed_at: file_changed,
                     uuid: Uuid::new_v4(),
                     path: entry_path,
+                    is_locked: false,
                     access: AccessControl {
                         owner,
                         is_public_for_viewing: true,
@@ -136,6 +160,7 @@ impl Folder {
             folders,
             files,
             path: path.to_path_buf(),
+            is_locked: false,
             access: AccessControl {
                 owner,
                 is_public_for_viewing: false,
@@ -156,6 +181,12 @@ impl Folder {
             }
         }
         None
+    }
+
+    fn list_files(&self) -> Vec<Fil> {
+        let mut files = self.files.clone();
+        files.extend(self.folders.iter().flat_map(|f| f.list_files()));
+        files
     }
 }
 

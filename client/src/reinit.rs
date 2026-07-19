@@ -29,7 +29,7 @@ pub struct PartSend {
 #[derive(Deserialize, Serialize, Debug)]
 pub struct PartAcc {
     pub path: String,
-    pub server_path: String,
+    pub server_uuid: String,
 }
 
 pub fn reinit(mut stream: TcpStream, uuid: &Uuid, filename: &str) -> std::io::Result<()> {

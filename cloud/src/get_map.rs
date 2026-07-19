@@ -26,7 +26,7 @@ pub struct FilMap {
     path: PathBuf,
 }
 
-pub fn get_map(mut stream: TcpStream, map_store: MapStore, client_uuid: Uuid) {
+pub fn get_map(mut stream: TcpStream, map_store: MapStore, client_uuid: &Uuid) {
     let read_lock = map_store.read().unwrap();
     let new_map = to_client_map(&read_lock, client_uuid);
     let json = serde_json::to_vec(&new_map).unwrap();
@@ -41,7 +41,7 @@ pub fn send_framed(stream: &mut TcpStream, payload: &[u8]) -> std::io::Result<()
     Ok(())
 }
 
-fn build_client_map(folder: &Folder, client_uuid: Uuid) -> FolderMap {
+fn build_client_map(folder: &Folder, client_uuid: &Uuid) -> FolderMap {
     let files: Vec<FilMap> = folder
         .files
         .iter()
@@ -71,7 +71,7 @@ fn build_client_map(folder: &Folder, client_uuid: Uuid) -> FolderMap {
 }
 
 /// Public entry point. Returns None if the client can't even view the root.
-pub fn to_client_map(root: &Folder, client_uuid: Uuid) -> Option<FolderMap> {
+pub fn to_client_map(root: &Folder, client_uuid: &Uuid) -> Option<FolderMap> {
     if !root.access.can_view(client_uuid) {
         return None;
     }

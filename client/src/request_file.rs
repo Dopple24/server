@@ -76,55 +76,36 @@ impl Transfer {
     }
 }
 
-pub fn request(
-    mut stream: TcpStream,
-    path: &String,
-    max_workers: usize,
-    file_name: &str,
-) -> std::io::Result<()> {
-    let path_bytes = path.as_bytes();
-    let len = path_bytes.len();
-
-    if 5 + len > CHUNK_SIZE {
-        panic!()
-    }
-
-    let mut buf = [0u8; CHUNK_SIZE];
+pub fn request(mut stream: TcpStream, max_workers: usize, file_uuid: &Uuid) -> std::io::Result<()> {
+    let mut buf = [0u8; 17];
     buf[0] = 5;
-    buf[1..5].copy_from_slice(&(len as u32).to_be_bytes());
-    buf[5..5 + len].copy_from_slice(path_bytes);
+    buf[1..17].copy_from_slice(&file_uuid.into_bytes());
     stream.write_all(&buf)?;
+
     let mut buf = [0u8; 100];
-    let n = stream.read(&mut buf)?;
+    stream.read(&mut buf)?;
     let chunks_len = u32::from_be_bytes(buf[0..4].try_into().unwrap());
     println!("{:?}", chunks_len);
 
     stream.write_all(&[20u8; 1]);
 
-    recieve(stream, path, max_workers, chunks_len as usize);
+    recieve(stream, max_workers, chunks_len as usize);
     Ok(())
 }
 
 pub fn reinitialize(
     mut stream: TcpStream,
     path: &str,
-    server_path: &str,
     max_workers: usize,
+    file_uuid: &Uuid,
 ) -> Result<(), Error> {
-    let path_bytes = server_path.as_bytes();
-    let len = path_bytes.len();
-
-    if 5 + len > CHUNK_SIZE {
-        panic!()
-    }
-
-    let mut buf = [0u8; CHUNK_SIZE];
-    buf[0] = 6;
-    buf[1..5].copy_from_slice(&(len as u32).to_be_bytes());
-    buf[5..5 + len].copy_from_slice(path_bytes);
+    let mut buf = [0u8; 17];
+    buf[0] = 5;
+    buf[1..17].copy_from_slice(&file_uuid.into_bytes());
     stream.write_all(&buf)?;
+
     let mut buf = [0u8; 100];
-    let n = stream.read(&mut buf)?;
+    stream.read(&mut buf)?;
     let chunks_len = u32::from_be_bytes(buf[0..4].try_into().unwrap());
     println!("{:?}", chunks_len);
 
@@ -231,11 +212,10 @@ fn find_temp_files(dir: &Path, results: &mut Vec<PathBuf>) -> std::io::Result<()
     Ok(())
 }
 
-pub fn recieve(mut stream: TcpStream, path: &String, max_workers: usize, file_size_chunks: usize) {
-    let mut file: Option<TransferedFile> = None;
+pub fn recieve(mut stream: TcpStream, max_workers: usize, file_size_chunks: usize) {
     let transfer = Arc::new(Mutex::new(Transfer::new(max_workers)));
 
-    file = Some(init_transfer(path, "test.txt", file_size_chunks).unwrap());
+    let file = Some(init_transfer("test.txt", file_size_chunks).unwrap());
     let mut buf = [0; 32];
     buf[0] = TransferSuccess::Ok.get_code();
     for (index, byte) in TransferSuccess::Ok.get_message().into_iter().enumerate() {
@@ -277,7 +257,6 @@ pub fn recieve(mut stream: TcpStream, path: &String, max_workers: usize, file_si
 }
 
 fn init_transfer(
-    path: &String,
     file_name: &str,
     file_size_chunks: usize,
 ) -> Result<TransferedFile, ErrorTransfer> {
@@ -587,34 +566,6 @@ fn execute_final_completion_check(stream: &mut TcpStream, lock_file: &Arc<Transf
         }
     }
     println!("file transfer complete");
-}
-
-fn decode_size(bytes: &[u8]) -> Result<usize, ErrorTransfer> {
-    if bytes.len() != 7 {
-        eprintln!("{:?}", bytes.len());
-        return Err(ErrorTransfer::InvalidLength);
-    }
-
-    let mut value = 0usize;
-    println!("{:?}", bytes);
-
-    for (i, &b) in bytes.iter().enumerate() {
-        let shift = 7 * i;
-
-        // Prevent shifting beyond usize capacity
-        if shift >= usize::BITS as usize {
-            return Err(ErrorTransfer::Overflow);
-        }
-
-        let part = ((b & 0x7F) as usize)
-            .checked_shl(shift as u32)
-            .ok_or(ErrorTransfer::Overflow)?;
-
-        value = value.checked_add(part).ok_or(ErrorTransfer::Overflow)?;
-    }
-    println!("{value}");
-
-    Ok(value)
 }
 
 fn update_config(path: &Mutex<PathBuf>, transf: &Arc<Mutex<Transfer>>) -> Result<(), Error> {
