@@ -1,4 +1,4 @@
-use crate::reinit::{Parts, reinit};
+use crate::reinit::{PartSend, Parts, reinit};
 use crate::request_file::request;
 use blake3::{Hash, Hasher};
 use std::collections::HashMap;
@@ -10,7 +10,7 @@ use std::net::TcpStream;
 use std::os::unix::fs::FileExt;
 use std::path::Path;
 use std::str::FromStr;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::thread;
 use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -26,6 +26,7 @@ const CHUNK_SIZE: usize = 32768;
 const OVERHEAD: usize = 11;
 const MAX_THREADS: u64 = 5;
 const PARTS_PATH: &str = "./parts.json";
+const NEW_PARTS_PATH: &str = "./parts.json.new";
 const SOCKET: &str = "127.0.0.1:6543";
 
 #[derive(Debug)]
@@ -47,19 +48,18 @@ fn main() -> std::io::Result<()> {
         return Ok(());
     }
 
+    let parts = get_parts_rw_lock();
+
     match args[1].as_str() {
-        "--send" => sending(TcpStream::connect(SOCKET)?, &args[2], &args[3]),
-        "--reinit" => {
-            let parts = get_parts();
-            let part = &parts.send[0];
-            reinit(
-                TcpStream::connect(SOCKET)?,
-                &part.uuid,
-                &part.filename,
-                &args[2],
-                &args[3],
-            )
-        }
+        "--send" => sending(
+            TcpStream::connect(SOCKET)?,
+            "./test.txt",
+            "test.txt",
+            &parts,
+            &args[2],
+            &args[3],
+        ),
+        "--reinit" => reinit(TcpStream::connect(SOCKET)?, &parts, &args[2], &args[3]),
         "--get" => {
             if args.len() < 5 {
                 println!(
@@ -70,21 +70,16 @@ fn main() -> std::io::Result<()> {
             request(
                 TcpStream::connect(SOCKET)?,
                 10,
+                &parts,
                 &args[2],
                 &args[3],
                 &Uuid::from_str(&args[4]).expect("provide a valid uuid"),
+                "./storage/test.txt",
+                "test.txt",
             )
         }
         "--get_reinit" => {
-            let parts = get_parts();
-            request_file::reinitialize(
-                TcpStream::connect(SOCKET)?,
-                &parts.acc[0].path,
-                10,
-                &args[2],
-                &args[3],
-                &Uuid::from_str(&parts.acc[0].server_uuid).expect("invalid uuid stored in parts"),
-            )
+            request_file::reinitialize(TcpStream::connect(SOCKET)?, &parts, 10, &args[2], &args[3])
         }
         "--get_map" => get_map::get_map(TcpStream::connect(SOCKET)?, &args[2], &args[3]),
         "--register" => {
@@ -111,7 +106,7 @@ fn main() -> std::io::Result<()> {
     }
 }
 
-fn get_parts() -> Parts {
+fn get_parts_rw_lock() -> Arc<RwLock<Parts>> {
     let mut file = OpenOptions::new()
         .read(true)
         .write(true)
@@ -130,27 +125,48 @@ fn get_parts() -> Parts {
         };
         let serialized = serde_json::to_string_pretty(&default).unwrap();
         file.write_all(serialized.as_bytes()).unwrap();
-        return default;
+        return Arc::new(RwLock::new(default));
     }
 
-    serde_json::from_str(&contents).expect("Failed to parse JSON")
+    Arc::new(RwLock::new(
+        serde_json::from_str(&contents).expect("Failed to parse JSON"),
+    ))
 }
 
-fn sending(mut stream: TcpStream, username: &str, password: &str) -> std::io::Result<()> {
-    let file_size = get_file_size(Path::new("./test.txt")).unwrap();
+fn sending(
+    mut stream: TcpStream,
+    path: &str,
+    filename: &str,
+    parts: &Arc<RwLock<Parts>>,
+    username: &str,
+    password: &str,
+) -> std::io::Result<()> {
+    let file_size = get_file_size(Path::new(path)).unwrap();
+    let transfer_uuid = Uuid::new_v4();
     let resp = send(
         &mut stream,
         file_size,
-        "test.txt".as_bytes(),
+        path.as_bytes(),
         username,
         password,
+        &transfer_uuid,
     )?;
+
     println!("response code: {:?}", &resp.clone()[0]);
     println!("response: {}", String::from_utf8_lossy(&resp[1..]));
 
     if &resp.clone()[0] != &20 {
         println!("{}", &resp.clone()[0]);
         return Ok(());
+    }
+
+    {
+        let mut parts_write = parts.write().unwrap();
+        parts_write.send.push(PartSend {
+            uuid: transfer_uuid,
+            filename: filename.to_string(),
+        });
+        parts_write.save();
     }
 
     let fil = Arc::new(File::open("./test.txt").unwrap());
@@ -386,6 +402,17 @@ fn sending(mut stream: TcpStream, username: &str, password: &str) -> std::io::Re
             Ok(_) => match buf[0] {
                 24 => {
                     println!("success");
+                    {
+                        let mut parts = parts.write().unwrap();
+                        if let Some(pos) = parts
+                            .send
+                            .iter()
+                            .position(|item| item.uuid == transfer_uuid)
+                        {
+                            parts.send.remove(pos);
+                        }
+                        parts.save();
+                    };
                     break;
                 }
                 val => {
@@ -433,8 +460,8 @@ fn send(
     file_name: &[u8],
     username: &str,
     password: &str,
+    transfer_uuid: &Uuid,
 ) -> Result<[u8; 128], Error> {
-    let transfer_uuid = Uuid::new_v4();
     let file_size = data;
 
     println!("{:?}", transfer_uuid);

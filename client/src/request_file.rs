@@ -1,6 +1,7 @@
 use blake3::{Hash, Hasher};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
+use std::fmt::format;
 use std::fs;
 use std::fs::create_dir_all;
 use std::fs::read_dir;
@@ -10,6 +11,8 @@ use std::io::{BufReader, Error};
 use std::net::TcpStream;
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
+use std::sync::RwLock;
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, SystemTime};
@@ -19,6 +22,8 @@ use std::{
 };
 use uuid::Uuid;
 
+use crate::reinit::PartAcc;
+use crate::reinit::Parts;
 use crate::reinit::first_message;
 use crate::response::ErrorTransfer;
 use crate::response::TransferSuccess;
@@ -80,25 +85,37 @@ impl Transfer {
 pub fn request(
     mut stream: TcpStream,
     max_workers: usize,
+    parts: &Arc<RwLock<Parts>>,
     username: &str,
     password: &str,
     file_uuid: &Uuid,
+    path_for_the_requested_file: &str,
+    filename: &str,
 ) -> std::io::Result<()> {
     stream.write_all(&first_message(5, file_uuid, username, password))?;
 
     let mut buf = [0u8; 100];
     stream.read(&mut buf)?;
 
-    if buf[0] != 20 {
-        match buf[0] {
-            48 => {
-                eprintln!("forbiden");
-                return Err(Error::last_os_error());
-            }
-            e => {
-                eprintln!("failed: {:?}", e);
-                return Err(Error::last_os_error());
-            }
+    let temp_path = format!("./temp/{:?}", filename);
+
+    match buf[0] {
+        20 => {
+            let mut parts_write = parts.write().unwrap();
+            parts_write.acc.push(PartAcc {
+                temp_path: temp_path.clone(),
+                real_path: path_for_the_requested_file.to_string(),
+                server_uuid: file_uuid.to_string(),
+            });
+            parts_write.save();
+        }
+        48 => {
+            eprintln!("forbiden");
+            return Err(Error::last_os_error());
+        }
+        e => {
+            eprintln!("failed: {:?}", e);
+            return Err(Error::last_os_error());
         }
     }
 
@@ -107,33 +124,69 @@ pub fn request(
 
     stream.write_all(&[20u8; 1]);
 
-    recieve(stream, max_workers, chunks_len as usize);
+    recieve(
+        stream,
+        &temp_path,
+        path_for_the_requested_file,
+        max_workers,
+        chunks_len as usize,
+    );
+
+    {
+        let mut parts = parts.write().unwrap();
+        if let Some(pos) = parts
+            .acc
+            .iter()
+            .position(|item| item.server_uuid == file_uuid.to_string())
+        {
+            parts.acc.remove(pos);
+        }
+        parts.save();
+    };
+
     Ok(())
 }
 
 pub fn reinitialize(
     mut stream: TcpStream,
-    path: &str,
+    parts: &Arc<RwLock<Parts>>,
     max_workers: usize,
     username: &str,
     password: &str,
-    file_uuid: &Uuid,
 ) -> Result<(), Error> {
-    stream.write_all(&first_message(5, file_uuid, username, password))?;
+    let (real_path, temp_path, file_uuid) = {
+        let parts_read = parts.read().unwrap();
+        if parts_read.acc.is_empty() {
+            eprintln!("acc in parts.json is empty, therefor there is nothing to reinit");
+            return Err(Error::last_os_error());
+        }
+        match Uuid::from_str(&parts_read.acc[0].server_uuid) {
+            Ok(u) => (
+                parts_read.acc[0].real_path.clone(),
+                parts_read.acc[0].temp_path.clone(),
+                u,
+            ),
+            Err(e) => {
+                eprintln!("failed parsing string into uuid: {:?}", e);
+                return Err(Error::last_os_error());
+            }
+        }
+    };
+
+    stream.write_all(&first_message(5, &file_uuid, username, password))?;
 
     let mut buf = [0u8; 100];
     stream.read(&mut buf)?;
 
-    if buf[0] != 20 {
-        match buf[0] {
-            48 => {
-                eprintln!("forbiden");
-                return Err(Error::last_os_error());
-            }
-            e => {
-                eprintln!("failed: {:?}", e);
-                return Err(Error::last_os_error());
-            }
+    match buf[0] {
+        20 => (),
+        48 => {
+            eprintln!("forbiden");
+            return Err(Error::last_os_error());
+        }
+        e => {
+            eprintln!("failed: {:?}", e);
+            return Err(Error::last_os_error());
         }
     }
 
@@ -157,7 +210,10 @@ pub fn reinitialize(
 
     find_temp_files(temp_location, &mut files);
 
-    let existing_path = Path::new(path);
+    let existing_path_string = format!("{temp_path}.config");
+    let existing_path = Path::new(&existing_path_string);
+
+    println!("path: {:?}", existing_path);
 
     let contents = fs::read_to_string(existing_path).unwrap();
     let config_file: ConfigFile = serde_json::from_str(&contents).unwrap();
@@ -176,7 +232,7 @@ pub fn reinitialize(
         file_size_chunks: config_file.file_size_chunks,
         file: Arc::new(file),
         temp_path: temp_at.to_path_buf(),
-        storage_path: temp_to_storage(temp_at.as_path()).unwrap(),
+        storage_path: Path::new(&real_path).to_path_buf(),
         config_path: Mutex::new(existing_path.to_path_buf()),
     });
 
@@ -221,12 +277,18 @@ pub fn reinitialize(
     std::fs::remove_file(&transfered_file.temp_path).unwrap();
     let cfg_path = transfered_file.config_path.lock().unwrap().clone();
     std::fs::remove_file(&cfg_path).unwrap();
+    {
+        let mut parts = parts.write().unwrap();
+        if let Some(pos) = parts
+            .acc
+            .iter()
+            .position(|item| item.server_uuid == file_uuid.to_string())
+        {
+            parts.acc.remove(pos);
+        }
+        parts.save();
+    };
     Ok(())
-}
-
-fn temp_to_storage(temp_path: &Path) -> Option<PathBuf> {
-    let relative = temp_path.strip_prefix("./temp").ok()?;
-    Some(Path::new("./storage").join(relative))
 }
 
 fn find_temp_files(dir: &Path, results: &mut Vec<PathBuf>) -> std::io::Result<()> {
@@ -243,10 +305,16 @@ fn find_temp_files(dir: &Path, results: &mut Vec<PathBuf>) -> std::io::Result<()
     Ok(())
 }
 
-pub fn recieve(mut stream: TcpStream, max_workers: usize, file_size_chunks: usize) {
+pub fn recieve(
+    mut stream: TcpStream,
+    temp_path: &str,
+    real_path: &str,
+    max_workers: usize,
+    file_size_chunks: usize,
+) {
     let transfer = Arc::new(Mutex::new(Transfer::new(max_workers)));
 
-    let file = Some(init_transfer("test.txt", file_size_chunks).unwrap());
+    let file = Some(init_transfer(temp_path, real_path, file_size_chunks).unwrap());
     let mut buf = [0; 32];
     buf[0] = TransferSuccess::Ok.get_code();
     for (index, byte) in TransferSuccess::Ok.get_message().into_iter().enumerate() {
@@ -288,7 +356,8 @@ pub fn recieve(mut stream: TcpStream, max_workers: usize, file_size_chunks: usiz
 }
 
 fn init_transfer(
-    file_name: &str,
+    temp_path: &str,
+    real_path: &str,
     file_size_chunks: usize,
 ) -> Result<TransferedFile, ErrorTransfer> {
     let temp_location = Path::new(TEMP_FOLDER_LOCATION);
@@ -302,21 +371,21 @@ fn init_transfer(
         create_dir_all(stor_location);
     }
 
-    let file_path = format!("{TEMP_FOLDER_LOCATION}/{}", file_name);
-    let storage_file_path = format!("{STORAGE_FOLDER_LOCATION}/{}", file_name);
-    let config_file_path = format!("{}.config", file_path);
+    let config_file_path = format!("{}.config", temp_path);
 
-    let path = Path::new(&file_path);
-    let storage_path = Path::new(&storage_file_path);
+    let path = Path::new(&temp_path);
+    let storage_path = Path::new(&real_path);
     let config_path = Path::new(&config_file_path);
 
     if path.exists() || storage_path.exists() || config_path.exists() {
         return Err(ErrorTransfer::ThisFileExists);
     }
+
+    println!("path: {:?}", path);
     let file = match File::create(path) {
         Ok(val) => val,
         Err(y) => {
-            println!("{:?}", y);
+            eprintln!("file creation failed: {:?}", y);
             return Err(ErrorTransfer::InternalServerError);
         }
     };

@@ -1,18 +1,22 @@
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
-    fs::File,
+    fs::{File, OpenOptions},
     io::{Read, Write},
     net::TcpStream,
     os::unix::fs::FileExt,
     path::Path,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, RwLock},
     thread,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use uuid::Uuid;
 
-use crate::{CHUNK_SIZE, MAX_THREADS, OVERHEAD, hash_file, send_chunk};
+use crate::{CHUNK_SIZE, MAX_THREADS, NEW_PARTS_PATH, OVERHEAD, PARTS_PATH, hash_file, send_chunk};
+
+pub enum PartsError {
+    FailedToSave,
+}
 
 #[derive(Deserialize, Serialize, Debug)]
 pub struct Parts {
@@ -20,7 +24,7 @@ pub struct Parts {
     pub acc: Vec<PartAcc>,
 }
 
-#[derive(Deserialize, Serialize, Debug)]
+#[derive(Deserialize, Serialize, Debug, Clone)]
 pub struct PartSend {
     pub uuid: Uuid,
     pub filename: String,
@@ -28,19 +32,72 @@ pub struct PartSend {
 
 #[derive(Deserialize, Serialize, Debug)]
 pub struct PartAcc {
-    pub path: String,
+    pub temp_path: String,
+    pub real_path: String,
     pub server_uuid: String,
+}
+
+impl Parts {
+    pub fn save(&self) -> Result<(), PartsError> {
+        let mut new_database_file = match OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(Path::new(NEW_PARTS_PATH))
+        {
+            Ok(fil) => fil,
+            Err(e) => {
+                eprint!("error opening database file: {:?}", e);
+                return Err(PartsError::FailedToSave);
+            }
+        };
+        let json_bytes = match serde_json::to_string_pretty(self) {
+            Ok(json) => json.into_bytes(),
+            Err(e) => {
+                eprintln!("invalid json: {:?}", e);
+                return Err(PartsError::FailedToSave);
+            }
+        };
+        match new_database_file.write_all(&json_bytes) {
+            Ok(_) => (),
+            Err(e) => {
+                eprintln!("failed to write into a file: {:?}", e);
+                return Err(PartsError::FailedToSave);
+            }
+        };
+
+        if let Err(e) = new_database_file.sync_all() {
+            eprintln!("failed to flush database file to disk: {:?}", e);
+            return Err(PartsError::FailedToSave);
+        }
+
+        match std::fs::rename(NEW_PARTS_PATH, PARTS_PATH) {
+            Ok(_) => Ok(()),
+            Err(e) => {
+                eprintln!("failed to replace old database with new one: {:?}", e);
+                Err(PartsError::FailedToSave)
+            }
+        }
+    }
 }
 
 pub fn reinit(
     mut stream: TcpStream,
-    uuid: &Uuid,
-    filename: &str,
+    parts: &Arc<RwLock<Parts>>,
     username: &str,
     password: &str,
 ) -> std::io::Result<()> {
-    let file_size = crate::get_file_size(Path::new(filename)).unwrap();
-    stream.write_all(&first_message(10, uuid, username, password))?;
+    let (filename, uuid) = {
+        let parts_lock = parts.read().unwrap();
+        (
+            parts_lock.send[0].filename.clone(),
+            parts_lock.send[0].uuid.clone(),
+        )
+    };
+    let file_size = crate::get_file_size(Path::new(&filename)).unwrap();
+    let first_message = first_message(10, &uuid, username, password);
+    println!("{:?}", first_message);
+    stream.write_all(&first_message)?;
     let mut buf = [0u8; CHUNK_SIZE];
     stream.read(&mut buf)?;
     println!("buf: {}", buf[0]);
@@ -271,6 +328,13 @@ pub fn reinit(
             Ok(_) => match buf[0] {
                 24 => {
                     println!("success");
+                    {
+                        let mut parts = parts.write().unwrap();
+                        if let Some(pos) = parts.send.iter().position(|item| item.uuid == uuid) {
+                            parts.send.remove(pos);
+                        }
+                        parts.save();
+                    };
                     break;
                 }
                 val => {
