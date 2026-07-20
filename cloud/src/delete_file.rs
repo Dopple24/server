@@ -4,7 +4,7 @@ use uuid::Uuid;
 
 use crate::{
     file_transfer::CHUNK_SIZE,
-    mapper::{Fil, MapStore},
+    mapper::{Fil, MapStore, with_file_mut},
     request::RequestType::CompletionCheck,
     response::{Code, ErrorTransfer, TransferSuccess},
 };
@@ -20,31 +20,33 @@ pub fn delete_file(
     println!("uuid: {:?}", uuid);
 
     println!("client_uuid: {:?}", client_uuid);
-    let fil = match Fil::find_mut(&uuid, &map_store, client_uuid) {
-        Ok(mut fil) => {
-            if !fil.lock() {
-                let buf = [ErrorTransfer::Locked.get_code(); 1];
+    let fil = {
+        match with_file_mut(&uuid, &map_store, client_uuid, |fil| fil.lock()) {
+            Ok(locked) => {
+                if !locked {
+                    let buf = [ErrorTransfer::Locked.get_code(); 1];
+                    stream.write_all(&buf);
+                    return;
+                }
+            }
+            Err(e) => {
+                let buf = [e.get_code(); 1];
                 stream.write_all(&buf);
                 return;
-            } else {
-                fil
             }
-        }
-        Err(e) => {
-            let buf = [e.get_code(); 1];
-            stream.write_all(&buf);
-            return;
-        }
+        };
+
+        let map_read = map_store.read().unwrap();
     };
 
-    if !fil.access.can_edit(&client_uuid) {
-        println!("accessControl: {:?}", fil.access);
-        println!("client uuid: {:?}", client_uuid);
-        stream.write_all(&[ErrorTransfer::Forbidden.get_code(); 1]);
-        return;
-    }
-
-    remove_file(fil.path);
+    with_file_mut(&uuid, &map_store, client_uuid, |fil| {
+        if !fil.access.can_edit(&client_uuid) {
+            stream.write_all(&[ErrorTransfer::Forbidden.get_code(); 1]);
+            return;
+        } else {
+            remove_file(fil.path.clone());
+        }
+    });
 
     match map_store.remove_file(&uuid, client_uuid) {
         Ok(_) => {

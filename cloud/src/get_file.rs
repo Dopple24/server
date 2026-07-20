@@ -16,7 +16,7 @@ use uuid::Uuid;
 
 use crate::auth::login_api;
 use crate::file_transfer::CHUNK_SIZE;
-use crate::mapper::{Fil, MapStore};
+use crate::mapper::{Fil, MapStore, with_file_mut};
 use crate::response::ErrorTransfer;
 const OVERHEAD: usize = 11;
 
@@ -31,15 +31,15 @@ impl Query {
         Some(Query { file_uuid })
     }
     fn get_path(&self, map: &MapStore, client_uuid: &Uuid) -> Result<PathBuf, ErrorTransfer> {
-        match Fil::find_mut(&self.file_uuid, map, client_uuid) {
-            Ok(mut fil) => {
-                if fil.lock() {
-                    Ok(fil.path)
-                } else {
-                    Err(ErrorTransfer::Locked)
-                }
+        match with_file_mut(&self.file_uuid, map, client_uuid, |fil| {
+            if fil.lock() {
+                Ok(fil.path.clone())
+            } else {
+                Err(ErrorTransfer::Locked)
             }
-            Err(e) => Err(e),
+        }) {
+            Ok(fil) => fil,
+            Err(e) => return Err(e),
         }
     }
 }
@@ -61,6 +61,7 @@ pub fn send_file(
             return;
         }
     };
+    println!("map_store: {:#?}", map_store);
     let path = match query.get_path(&map_store, client_uuid) {
         Ok(p) => p,
         Err(e) => {
@@ -70,6 +71,8 @@ pub fn send_file(
             return;
         }
     };
+    println!("map_store: {:#?}", map_store);
+
     println!("path: {:?}", path);
     let file_size = get_file_size(&path).unwrap();
     let chunks_len = get_chunks_len(file_size);
@@ -100,9 +103,12 @@ pub fn send_file(
         None,
     );
 
-    Fil::find_mut(&query.file_uuid, &map_store, client_uuid)
-        .unwrap()
-        .unlock();
+    println!("map_store before unlock: {:#?}", map_store);
+
+    with_file_mut(&query.file_uuid, &map_store, client_uuid, |fil| {
+        fil.unlock()
+    })
+    .unwrap();
 }
 
 pub fn reinit_send_file(
@@ -164,9 +170,10 @@ pub fn reinit_send_file(
         Some(chunks_to_send),
     );
 
-    Fil::find_mut(&query.file_uuid, &map_store, client_uuid)
-        .unwrap()
-        .unlock();
+    with_file_mut(&query.file_uuid, &map_store, client_uuid, |fil| {
+        fil.unlock()
+    })
+    .unwrap();
 }
 
 fn workers_send(

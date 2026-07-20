@@ -94,25 +94,7 @@ impl Fil {
             },
         }
     }
-    pub fn find_mut(
-        target: &Uuid,
-        map: &MapStore,
-        client_uuid: &Uuid,
-    ) -> Result<Fil, ErrorTransfer> {
-        let guard = map.inner.read().unwrap();
-        let files = guard.list_files();
-        let fil = files.iter().find(|fil| &fil.uuid == target);
-        match fil {
-            None => return Err(ErrorTransfer::NotFound),
-            Some(f) => {
-                if f.access.can_view(client_uuid) {
-                    Ok(f.clone())
-                } else {
-                    Err(ErrorTransfer::Forbidden)
-                }
-            }
-        }
-    }
+
     pub fn lock(&mut self) -> bool {
         match self.is_locked {
             true => false,
@@ -253,6 +235,7 @@ impl From<serde_json::Error> for MapError {
 /// over the real path. Readers of map.json (in this process or any other
 /// tool) never observe a partially-written file.
 fn persist(root: &Folder) -> Result<(), MapError> {
+    println!("persist running. root: {:#?}", root);
     let json = serde_json::to_string_pretty(root)?;
     fs::write(MAP_TMP_PATH, json)?;
     fs::rename(MAP_TMP_PATH, MAP_PATH)?;
@@ -279,7 +262,7 @@ impl MapStore {
     pub fn unlock_all(&mut self) -> Result<(), MapError> {
         let folder = self.inner.write().unwrap();
         folder.list_files().iter_mut().for_each(|fil| fil.unlock());
-        Ok(())
+        persist(&folder)
     }
 
     /// Rebuilds the map from `path` on disk, replacing the in-memory map
@@ -341,4 +324,33 @@ impl MapStore {
     pub fn read(&self) -> Result<RwLockReadGuard<'_, Folder>, MapError> {
         self.inner.read().map_err(|_| MapError::Poisoned)
     }
+}
+
+pub fn with_file_mut<T>(
+    target: &Uuid,
+    map: &MapStore,
+    client_uuid: &Uuid,
+    f: impl FnOnce(&mut Fil) -> T,
+) -> Result<T, ErrorTransfer> {
+    let mut guard = map.inner.write().unwrap(); // needs write lock now
+    let fil = find_file_mut(&mut guard, target).ok_or(ErrorTransfer::NotFound)?;
+
+    if !fil.access.can_view(client_uuid) {
+        return Err(ErrorTransfer::Forbidden);
+    }
+
+    Ok(f(fil))
+}
+
+/// Recursively searches the folder tree for a file with the given uuid.
+fn find_file_mut<'a>(folder: &'a mut Folder, target: &Uuid) -> Option<&'a mut Fil> {
+    if let Some(pos) = folder.files.iter().position(|fil| &fil.uuid == target) {
+        return Some(&mut folder.files[pos]);
+    }
+    for sub in folder.folders.iter_mut() {
+        if let Some(fil) = find_file_mut(sub, target) {
+            return Some(fil);
+        }
+    }
+    None
 }

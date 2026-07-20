@@ -145,6 +145,7 @@ fn sending(
     username: &str,
     password: &str,
 ) -> std::io::Result<()> {
+    println!("path {:?}", Path::new(path));
     let file_size = get_file_size(Path::new(path)).unwrap();
     let transfer_uuid = Uuid::new_v4();
     let resp = send(
