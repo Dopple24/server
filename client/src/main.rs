@@ -17,6 +17,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
 mod auth;
+mod delete_file;
 mod get_map;
 mod reinit;
 mod request_file;
@@ -96,6 +97,9 @@ fn main() -> std::io::Result<()> {
                     Err(Error::last_os_error())
                 }
             }
+        }
+        "--delete" => {
+            delete_file::delete(TcpStream::connect(SOCKET)?, &args[2], &args[3], &args[4])
         }
         _ => {
             println!(

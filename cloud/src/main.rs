@@ -9,6 +9,7 @@ use argon2::{
 use crate::mapper::MapStore;
 
 mod auth;
+mod delete_file;
 mod file_transfer;
 mod get_file;
 mod get_map;
@@ -19,7 +20,8 @@ mod router;
 
 fn main() -> std::io::Result<()> {
     dotenvy::dotenv().ok();
-    let map_store = MapStore::load().unwrap();
+    let mut map_store = MapStore::load().unwrap();
+    map_store.unlock_all().unwrap();
 
     let listener = TcpListener::bind("127.0.0.1:6543")?;
     println!("Server listening on 127.0.0.1:6543");

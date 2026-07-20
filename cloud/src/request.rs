@@ -19,6 +19,7 @@ pub enum RequestType {
     GetMap,
     Register,
     Unknown,
+    Delete,
 }
 
 impl RequestType {
@@ -34,6 +35,7 @@ impl RequestType {
             6 => Self::ReinitGetFile,
             8 => Self::Register,
             9 => Self::GetMap,
+            255 => Self::Delete,
             _ => Self::Unknown,
         }
     }

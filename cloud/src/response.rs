@@ -41,7 +41,8 @@ pub enum ErrorTransfer {
     InternalServerError,
     TooFast,
     HashesDoNotMatch,
-    Forbiden,
+    Forbidden,
+    Locked,
 }
 
 impl Code for ErrorTransfer {
@@ -55,9 +56,10 @@ impl Code for ErrorTransfer {
             Self::AlreadyInitialized => 46,
             Self::HashesDoNotMatch => 47,
             Self::ThisFileExists => 41,
-            Self::Forbiden => 48,
+            Self::Forbidden => 48,
             Self::InternalServerError => 50,
             Self::TooFast => 51,
+            Self::Locked => 53,
         }
     }
     fn get_message(&self) -> Vec<u8> {
@@ -71,9 +73,10 @@ impl Code for ErrorTransfer {
             Self::AlreadyInitialized => "46 already initialized".to_string(),
             Self::HashesDoNotMatch => "47 hashes do not match".to_string(),
             Self::ThisFileExists => "41 file with this name already exists".to_string(),
-            Self::Forbiden => "48 forbiden".to_string(),
+            Self::Forbidden => "48 forbiden".to_string(),
             Self::InternalServerError => "50 internal server error".to_string(),
             Self::TooFast => "51 too fast".to_string(),
+            Self::Locked => "53 requested file is locked".to_string(),
         };
         buffer.extend_from_slice(msg.as_bytes());
         buffer

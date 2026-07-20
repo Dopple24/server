@@ -17,17 +17,8 @@ use uuid::Uuid;
 use crate::auth::login_api;
 use crate::file_transfer::CHUNK_SIZE;
 use crate::mapper::{Fil, MapStore};
+use crate::response::ErrorTransfer;
 const OVERHEAD: usize = 11;
-
-#[derive(Debug)]
-pub enum TransferError {
-    InvalidLength,
-    InvalidUuid,
-    Overflow,
-    FileNotFound,
-    MetadataNotFound,
-    Forbidden,
-}
 
 struct Query {
     file_uuid: Uuid,
@@ -39,9 +30,15 @@ impl Query {
         let file_uuid = Uuid::from_bytes(bytes[0..16].try_into().unwrap());
         Some(Query { file_uuid })
     }
-    fn get_path(&self, map: &MapStore, client_uuid: &Uuid) -> Result<PathBuf, TransferError> {
+    fn get_path(&self, map: &MapStore, client_uuid: &Uuid) -> Result<PathBuf, ErrorTransfer> {
         match Fil::find_mut(&self.file_uuid, map, client_uuid) {
-            Ok(fil) => Ok(fil.path),
+            Ok(mut fil) => {
+                if fil.lock() {
+                    Ok(fil.path)
+                } else {
+                    Err(ErrorTransfer::Locked)
+                }
+            }
             Err(e) => Err(e),
         }
     }
@@ -102,6 +99,10 @@ pub fn send_file(
         file_size,
         None,
     );
+
+    Fil::find_mut(&query.file_uuid, &map_store, client_uuid)
+        .unwrap()
+        .unlock();
 }
 
 pub fn reinit_send_file(
@@ -150,7 +151,7 @@ pub fn reinit_send_file(
     }
 
     let arc_stream = Arc::new(Mutex::new(stream));
-    let mut chunks_to_send = Arc::new(Mutex::new(Vec::new()));
+    let chunks_to_send = Arc::new(Mutex::new(Vec::new()));
 
     confirm_completion(&arc_stream, &chunks_to_send);
 
@@ -162,6 +163,10 @@ pub fn reinit_send_file(
         file_size,
         Some(chunks_to_send),
     );
+
+    Fil::find_mut(&query.file_uuid, &map_store, client_uuid)
+        .unwrap()
+        .unlock();
 }
 
 fn workers_send(
@@ -490,15 +495,15 @@ fn send_chunk(
     println!("in_flight is now: {:?}", in_flight.lock().unwrap());
 }
 
-fn get_file_size(path: &Path) -> Result<u64, TransferError> {
+fn get_file_size(path: &Path) -> Result<u64, ErrorTransfer> {
     let file = match OpenOptions::new().read(true).open(path) {
         Ok(file) => file,
-        Err(_) => return Err(TransferError::FileNotFound),
+        Err(_) => return Err(ErrorTransfer::NotFound),
     };
 
     let size = match file.metadata() {
         Ok(md) => md.len(),
-        Err(_) => return Err(TransferError::MetadataNotFound),
+        Err(_) => return Err(ErrorTransfer::InternalServerError),
     };
     println!("size: {size}");
     Ok(size)

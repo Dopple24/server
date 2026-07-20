@@ -110,7 +110,7 @@ pub fn request(
             parts_write.save();
         }
         48 => {
-            eprintln!("forbiden");
+            eprintln!("forbidden");
             return Err(Error::last_os_error());
         }
         e => {

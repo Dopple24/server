@@ -1,4 +1,3 @@
-use crate::get_file::TransferError;
 use chrono::{DateTime, Local, Utc};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -8,11 +7,13 @@ use std::{
 };
 use uuid::Uuid;
 
+use crate::response::ErrorTransfer;
+
 const MAP_PATH: &str = "./map.json";
 const MAP_TMP_PATH: &str = "./map.json.tmp";
 
 /// Shared ownership/permission fields, used by both Folder and Fil.
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct AccessControl {
     pub owner: Uuid,
     pub is_public_for_viewing: bool,
@@ -44,7 +45,7 @@ impl AccessControl {
     }
 }
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Folder {
     pub uuid: Uuid,
     pub name: String,
@@ -57,7 +58,7 @@ pub struct Folder {
     pub access: AccessControl,
 }
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Fil {
     pub name: String,
     pub last_changed_at: DateTime<Utc>,
@@ -97,20 +98,35 @@ impl Fil {
         target: &Uuid,
         map: &MapStore,
         client_uuid: &Uuid,
-    ) -> Result<Fil, TransferError> {
+    ) -> Result<Fil, ErrorTransfer> {
         let guard = map.inner.read().unwrap();
         let files = guard.list_files();
         let fil = files.iter().find(|fil| &fil.uuid == target);
         match fil {
-            None => return Err(TransferError::FileNotFound),
+            None => return Err(ErrorTransfer::NotFound),
             Some(f) => {
                 if f.access.can_view(client_uuid) {
                     Ok(f.clone())
                 } else {
-                    Err(TransferError::Forbidden)
+                    Err(ErrorTransfer::Forbidden)
                 }
             }
         }
+    }
+    pub fn lock(&mut self) -> bool {
+        match self.is_locked {
+            true => false,
+            false => {
+                self.is_locked = true;
+                true
+            }
+        }
+    }
+    pub fn lock_unchecked(&mut self) {
+        self.is_locked = true;
+    }
+    pub fn unlock(&mut self) {
+        self.is_locked = false;
     }
 }
 
@@ -171,7 +187,7 @@ impl Folder {
         })
     }
 
-    fn find_mut(&mut self, target: Uuid) -> Option<&mut Folder> {
+    pub fn find_mut(&mut self, target: Uuid) -> Option<&mut Folder> {
         if self.uuid == target {
             return Some(self);
         }
@@ -187,6 +203,28 @@ impl Folder {
         let mut files = self.files.clone();
         files.extend(self.folders.iter().flat_map(|f| f.list_files()));
         files
+    }
+
+    pub fn find_file_parent(
+        &mut self,
+        target: &Uuid,
+        client_uuid: &Uuid,
+    ) -> Result<&mut Self, ErrorTransfer> {
+        if let Some(f) = self.files.iter().find(|f| &f.uuid == target) {
+            return if f.access.can_view(client_uuid) {
+                Ok(self)
+            } else {
+                Err(ErrorTransfer::Forbidden)
+            };
+        }
+
+        for folder in &mut self.folders {
+            if let Ok(parent) = folder.find_file_parent(target, client_uuid) {
+                return Ok(parent);
+            }
+        }
+
+        Err(ErrorTransfer::NotFound)
     }
 }
 
@@ -223,9 +261,9 @@ fn persist(root: &Folder) -> Result<(), MapError> {
 
 /// Shared, thread-safe handle to the in-memory map. Clone this (cheap,
 /// just bumps an Arc refcount) to share across threads.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct MapStore {
-    inner: Arc<RwLock<Folder>>,
+    pub inner: Arc<RwLock<Folder>>,
 }
 
 impl MapStore {
@@ -236,6 +274,12 @@ impl MapStore {
         Ok(MapStore {
             inner: Arc::new(RwLock::new(root)),
         })
+    }
+
+    pub fn unlock_all(&mut self) -> Result<(), MapError> {
+        let folder = self.inner.write().unwrap();
+        folder.list_files().iter_mut().for_each(|fil| fil.unlock());
+        Ok(())
     }
 
     /// Rebuilds the map from `path` on disk, replacing the in-memory map
@@ -272,6 +316,24 @@ impl MapStore {
         persist(&guard)?;
         Ok(())
         // write guard dropped here
+    }
+
+    pub fn remove_file(&self, file_uuid: &Uuid, client_uuid: &Uuid) -> Result<(), ErrorTransfer> {
+        let mut map_write = self.inner.write().unwrap();
+        let mut folder = match map_write.find_file_parent(file_uuid, client_uuid) {
+            Ok(f) => f,
+            Err(e) => {
+                return Err(e);
+            }
+        };
+
+        if let Some(pos) = folder.files.iter().position(|file| &file.uuid == file_uuid) {
+            folder.files.remove(pos);
+            println!("map_write: {:#?}", map_write);
+            persist(&mut map_write);
+        };
+
+        Ok(())
     }
 
     /// Read-only access to the map. Any number of readers can hold this

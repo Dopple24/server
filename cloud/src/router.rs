@@ -2,6 +2,7 @@ use uuid::Uuid;
 
 use crate::{
     auth::{self, login_api},
+    delete_file,
     file_transfer::{CHUNK_SIZE, recieve, reinitialize},
     get_file, get_map,
     mapper::MapStore,
@@ -57,6 +58,9 @@ pub fn handle_client(mut stream: TcpStream, max_workers: usize, map_store: MapSt
                 offset,
             ),
             RequestType::GetMap => get_map::get_map(stream, map_store, &client_uuid),
+            RequestType::Delete => {
+                delete_file::delete_file(stream, buffer, map_store, &client_uuid, offset)
+            }
             _ => {
                 println!("shuting down");
                 stream.shutdown(std::net::Shutdown::Both);
