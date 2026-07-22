@@ -43,6 +43,7 @@ pub enum ErrorTransfer {
     HashesDoNotMatch,
     Forbidden,
     Locked,
+    InvalidRequest,
 }
 
 impl Code for ErrorTransfer {
@@ -60,6 +61,7 @@ impl Code for ErrorTransfer {
             Self::InternalServerError => 50,
             Self::TooFast => 51,
             Self::Locked => 53,
+            Self::InvalidRequest => 42,
         }
     }
     fn get_message(&self) -> Vec<u8> {
@@ -68,6 +70,7 @@ impl Code for ErrorTransfer {
             Self::InvalidLength => "40 invalid length".to_string(),
             Self::InvalidUuid => "40 invalid uuid".to_string(),
             Self::Overflow => "40 request too big".to_string(),
+            Self::InvalidRequest => "42 invalid request".to_string(),
             Self::NotFound => "44 not found".to_string(),
             Self::NotInitialized => "45 not initialized".to_string(),
             Self::AlreadyInitialized => "46 already initialized".to_string(),

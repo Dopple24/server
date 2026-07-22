@@ -20,23 +20,19 @@ pub fn delete_file(
     println!("uuid: {:?}", uuid);
 
     println!("client_uuid: {:?}", client_uuid);
-    let fil = {
-        match with_file_mut(&uuid, &map_store, client_uuid, |fil| fil.lock()) {
-            Ok(locked) => {
-                if !locked {
-                    let buf = [ErrorTransfer::Locked.get_code(); 1];
-                    stream.write_all(&buf);
-                    return;
-                }
-            }
-            Err(e) => {
-                let buf = [e.get_code(); 1];
+    match with_file_mut(&uuid, &map_store, client_uuid, |fil| fil.lock()) {
+        Ok(locked) => {
+            if !locked {
+                let buf = [ErrorTransfer::Locked.get_code(); 1];
                 stream.write_all(&buf);
                 return;
             }
-        };
-
-        let map_read = map_store.read().unwrap();
+        }
+        Err(e) => {
+            let buf = [e.get_code(); 1];
+            stream.write_all(&buf);
+            return;
+        }
     };
 
     with_file_mut(&uuid, &map_store, client_uuid, |fil| {

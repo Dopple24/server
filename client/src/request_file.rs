@@ -60,17 +60,17 @@ struct TransferedFile {
 }
 
 #[derive(Clone)]
-struct Transfer {
-    chunks: Vec<[u8; CHUNK_SIZE]>,
-    responses: Vec<[u8; 16]>,
-    should_die: bool,
-    max_workers: usize,
-    dead_workers: usize,
-    chunk_log: HashSet<usize>,
+pub struct Transfer {
+    pub chunks: Vec<[u8; CHUNK_SIZE]>,
+    pub responses: Vec<[u8; 16]>,
+    pub should_die: bool,
+    pub max_workers: usize,
+    pub dead_workers: usize,
+    pub chunk_log: HashSet<usize>,
 }
 
 impl Transfer {
-    fn new(max_workers: usize) -> Self {
+    pub fn new(max_workers: usize) -> Self {
         Transfer {
             chunk_log: HashSet::new(),
             chunks: Vec::new(),

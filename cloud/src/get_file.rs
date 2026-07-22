@@ -176,7 +176,7 @@ pub fn reinit_send_file(
     .unwrap();
 }
 
-fn workers_send(
+pub fn workers_send(
     workers: usize,
     chunks_len: u32,
     arc_stream: Arc<Mutex<TcpStream>>,
@@ -502,7 +502,7 @@ fn send_chunk(
     println!("in_flight is now: {:?}", in_flight.lock().unwrap());
 }
 
-fn get_file_size(path: &Path) -> Result<u64, ErrorTransfer> {
+pub fn get_file_size(path: &Path) -> Result<u64, ErrorTransfer> {
     let file = match OpenOptions::new().read(true).open(path) {
         Ok(file) => file,
         Err(_) => return Err(ErrorTransfer::NotFound),
@@ -516,7 +516,7 @@ fn get_file_size(path: &Path) -> Result<u64, ErrorTransfer> {
     Ok(size)
 }
 
-fn get_chunks_len(file_size: u64) -> u32 {
+pub fn get_chunks_len(file_size: u64) -> u32 {
     let payload = (CHUNK_SIZE - OVERHEAD) as u64;
     file_size.div_ceil(payload) as u32
 }

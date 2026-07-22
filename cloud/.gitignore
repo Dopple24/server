@@ -6,3 +6,4 @@ output
 database.json
 new_database.json
 .env
+public_links.json

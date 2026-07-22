@@ -208,6 +208,22 @@ impl Folder {
 
         Err(ErrorTransfer::NotFound)
     }
+
+    pub fn find_file_clone(&self, target: &Uuid, client_uuid: &Uuid) -> Result<Fil, ErrorTransfer> {
+        if let Some(f) = self.files.iter().find(|f| &f.uuid == target) {
+            return if f.access.can_view(client_uuid) {
+                Ok(f.clone())
+            } else {
+                Err(ErrorTransfer::Forbidden)
+            };
+        }
+        for folder in &self.folders {
+            if let Ok(file) = folder.find_file_clone(target, client_uuid) {
+                return Ok(file);
+            }
+        }
+        Err(ErrorTransfer::NotFound)
+    }
 }
 
 #[derive(Debug)]
@@ -338,6 +354,18 @@ pub fn with_file_mut<T>(
     if !fil.access.can_view(client_uuid) {
         return Err(ErrorTransfer::Forbidden);
     }
+
+    Ok(f(fil))
+}
+
+///doesn't check if the current client has access to this file.
+pub fn with_file_mut_unchecked<T>(
+    target: &Uuid,
+    map: &MapStore,
+    f: impl FnOnce(&mut Fil) -> T,
+) -> Result<T, ErrorTransfer> {
+    let mut guard = map.inner.write().unwrap(); // needs write lock now
+    let fil = find_file_mut(&mut guard, target).ok_or(ErrorTransfer::NotFound)?;
 
     Ok(f(fil))
 }

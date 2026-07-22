@@ -1,6 +1,3 @@
-use crate::file_transfer::CHUNK_SIZE;
-use crate::response::ErrorTransfer;
-
 #[derive(Debug, PartialEq)]
 pub enum RequestType {
     //each request should have type ([0])
@@ -20,6 +17,8 @@ pub enum RequestType {
     Register,
     Unknown,
     Delete,
+    GuestRequestFile,
+    ShareLink,
 }
 
 impl RequestType {
@@ -35,32 +34,10 @@ impl RequestType {
             6 => Self::ReinitGetFile,
             8 => Self::Register,
             9 => Self::GetMap,
+            100 => Self::ShareLink,
+            200 => Self::GuestRequestFile,
             255 => Self::Delete,
             _ => Self::Unknown,
         }
-    }
-}
-
-#[derive(Debug)]
-pub struct Request {
-    pub request_type: RequestType,
-    pub contents: Vec<u8>,
-}
-
-impl Request {
-    pub fn decipher(data: [u8; CHUNK_SIZE]) -> Result<Self, ErrorTransfer> {
-        if data.len() < 7 {
-            println!("this too long or sth: {:?}, {}", data, data.len());
-            return Err(ErrorTransfer::InvalidLength);
-        }
-
-        let req_type = match RequestType::get_type(data[0]) {
-            RequestType::Unknown => return Err(ErrorTransfer::NotFound),
-            x => x,
-        };
-        Ok(Self {
-            request_type: req_type,
-            contents: data[1..].to_vec(),
-        })
     }
 }

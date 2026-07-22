@@ -1,6 +1,5 @@
 use crate::mapper::Fil;
 use crate::mapper::MapStore;
-use crate::request::Request;
 use crate::request::RequestType;
 use crate::response;
 use crate::response::{Code, ErrorTransfer, TransferSuccess};
@@ -26,7 +25,7 @@ use std::{
 use uuid::Uuid;
 
 pub const CHUNK_SIZE: usize = 32768;
-const OVERHEAD: usize = 11;
+pub const OVERHEAD: usize = 11;
 const MAX_STORED: usize = 20;
 const TEMP_FOLDER_LOCATION: &str = "./temp";
 const STORAGE_FOLDER_LOCATION: &str = "./storage";

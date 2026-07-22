@@ -14,14 +14,17 @@ use std::sync::{Arc, Mutex, RwLock};
 use std::thread;
 use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
+use tiny_http::Server;
 use uuid::Uuid;
 
 mod auth;
 mod delete_file;
 mod get_map;
+mod guest_request_file;
 mod reinit;
 mod request_file;
 mod response;
+mod share_link;
 
 const CHUNK_SIZE: usize = 32768;
 const OVERHEAD: usize = 11;
@@ -42,16 +45,36 @@ enum TransferError {
 fn main() -> std::io::Result<()> {
     let args: Vec<String> = args().collect();
 
-    if args.len() < 2 {
-        println!(
-            "Please enter an arg. Either --send for sending or --reinit for reinitialization, login and password must be included too"
-        );
-        return Ok(());
-    }
-
     let parts = get_parts_rw_lock();
 
     match args[1].as_str() {
+        "--serve_public" => {
+            let server = Server::http("0.0.0.0:8080").unwrap();
+            println!("Listening on port 8080");
+
+            for req in server.incoming_requests() {
+                let url = req.url().to_string();
+                let parts: Vec<&str> = url.split('/').collect();
+
+                // expects URLs like /dl/61b3bd2e-b5a1-40cd-a5d1-53214e9e6a73
+                match parts.as_slice() {
+                    ["", "dl", uuid_str] => match Uuid::from_str(uuid_str) {
+                        Ok(uuid) => guest_request_file::handle_download(req, &uuid),
+                        Err(_) => {
+                            let response = tiny_http::Response::from_string("invalid uuid")
+                                .with_status_code(400);
+                            req.respond(response).unwrap();
+                        }
+                    },
+                    _ => {
+                        let response =
+                            tiny_http::Response::from_string("not found").with_status_code(404);
+                        req.respond(response).unwrap();
+                    }
+                }
+            }
+            Ok(())
+        }
         "--send" => sending(
             TcpStream::connect(SOCKET)?,
             "./test.txt",
@@ -101,6 +124,13 @@ fn main() -> std::io::Result<()> {
         "--delete" => {
             delete_file::delete(TcpStream::connect(SOCKET)?, &args[2], &args[3], &args[4])
         }
+        "--share_link" => share_link::share_link(
+            TcpStream::connect(SOCKET)?,
+            &args[2],
+            &args[3],
+            &args[4],
+            &args[5],
+        ),
         _ => {
             println!(
                 "Please enter an arg. Either --send for sending or --reinit for reinitialization"
