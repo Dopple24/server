@@ -32,7 +32,7 @@ impl Code for TransferSuccess {
 #[derive(Debug)]
 pub enum ErrorTransfer {
     InvalidLength,
-    InvalidUuid,
+    InvalidHash,
     Overflow,
     NotFound,
     NotInitialized,
@@ -50,25 +50,25 @@ impl Code for ErrorTransfer {
     fn get_code(&self) -> u8 {
         match self {
             Self::InvalidLength => 40,
-            Self::InvalidUuid => 40,
             Self::Overflow => 40,
+            Self::ThisFileExists => 41,
+            Self::InvalidRequest => 42,
             Self::NotFound => 44,
             Self::NotInitialized => 45,
             Self::AlreadyInitialized => 46,
             Self::HashesDoNotMatch => 47,
-            Self::ThisFileExists => 41,
             Self::Forbidden => 48,
+            Self::InvalidHash => 49,
             Self::InternalServerError => 50,
             Self::TooFast => 51,
             Self::Locked => 53,
-            Self::InvalidRequest => 42,
         }
     }
     fn get_message(&self) -> Vec<u8> {
         let mut buffer: Vec<u8> = Vec::with_capacity(15);
         let msg: String = match self {
             Self::InvalidLength => "40 invalid length".to_string(),
-            Self::InvalidUuid => "40 invalid uuid".to_string(),
+            Self::InvalidHash => "49 invalid hash".to_string(),
             Self::Overflow => "40 request too big".to_string(),
             Self::InvalidRequest => "42 invalid request".to_string(),
             Self::NotFound => "44 not found".to_string(),

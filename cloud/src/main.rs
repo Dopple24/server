@@ -8,6 +8,7 @@ use crate::mapper::MapStore;
 
 mod auth;
 mod delete_file;
+mod errors;
 mod file_transfer;
 mod get_file;
 mod get_map;
@@ -36,7 +37,6 @@ fn main() -> std::io::Result<()> {
                 println!("New connection: {}", stream.peer_addr()?);
 
                 std::thread::spawn(move || {
-                    println!("was there");
                     handle_client(stream, 5, store_clone, &links_clone);
                 });
             }

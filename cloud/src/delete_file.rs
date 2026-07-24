@@ -1,11 +1,10 @@
-use std::{fs::remove_file, io::Write, net::TcpStream};
+use std::{eprintln, fs::remove_file, io::Write, net::TcpStream};
 
 use uuid::Uuid;
 
 use crate::{
     file_transfer::CHUNK_SIZE,
-    mapper::{Fil, MapStore, with_file_mut},
-    request::RequestType::CompletionCheck,
+    mapper::{MapStore, with_file_mut},
     response::{Code, ErrorTransfer, TransferSuccess},
 };
 
@@ -24,33 +23,46 @@ pub fn delete_file(
         Ok(locked) => {
             if !locked {
                 let buf = [ErrorTransfer::Locked.get_code(); 1];
-                stream.write_all(&buf);
+                let _ = stream.write_all(&buf);
                 return;
             }
         }
         Err(e) => {
             let buf = [e.get_code(); 1];
-            stream.write_all(&buf);
+            let _ = stream.write_all(&buf);
             return;
         }
     };
 
-    with_file_mut(&uuid, &map_store, client_uuid, |fil| {
+    match with_file_mut(&uuid, &map_store, client_uuid, |fil| {
         if !fil.access.can_edit(&client_uuid) {
-            stream.write_all(&[ErrorTransfer::Forbidden.get_code(); 1]);
+            let _ = stream.write_all(&[ErrorTransfer::Forbidden.get_code(); 1]);
             return;
         } else {
-            remove_file(fil.path.clone());
+            match remove_file(fil.path.clone()) {
+                Ok(_) => (),
+                Err(e) => {
+                    eprintln!("delete file failed at removing the file: {:?}", e);
+                    let _ = stream.write_all(&[50]);
+                    return;
+                }
+            };
         }
-    });
+    }) {
+        Ok(_) => (),
+        Err(e) => {
+            let _ = stream.write_all(&[e.get_code()]);
+            return;
+        }
+    };
 
     match map_store.remove_file(&uuid, client_uuid) {
         Ok(_) => {
-            stream.write_all(&[TransferSuccess::Ok.get_code()]);
+            let _ = stream.write_all(&[TransferSuccess::Ok.get_code()]);
         }
         Err(e) => {
-            println!("error removing file: {:?}", e);
-            stream.write_all(&[e.get_code()]);
+            eprintln!("error removing file from map: {:?}", e);
+            let _ = stream.write_all(&[e.get_code()]);
         }
     }
 }

@@ -2,10 +2,11 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
     fs::{File, OpenOptions},
-    io::{Read, Write},
+    io::{Error, Read, Write},
     net::TcpStream,
     os::unix::fs::FileExt,
     path::Path,
+    println,
     sync::{Arc, Mutex, RwLock},
     thread,
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -96,7 +97,7 @@ pub fn reinit(
     };
     let file_size = crate::get_file_size(Path::new(&filename)).unwrap();
     let first_message = first_message(10, &uuid, username, password);
-    println!("{:?}", first_message);
+    println!("uuid: {:?}", uuid);
     stream.write_all(&first_message)?;
     let mut buf = [0u8; CHUNK_SIZE];
     stream.read(&mut buf)?;
@@ -382,6 +383,8 @@ pub fn first_message(
     buf[username_end] = password_bytes.len() as u8;
     buf[password_start..password_end].copy_from_slice(password_bytes);
     buf[uuid_start..uuid_end].copy_from_slice(uuid.as_bytes());
+
+    println!("{:?}", buf[..uuid_end].to_vec());
 
     buf
 }

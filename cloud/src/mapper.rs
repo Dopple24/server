@@ -251,7 +251,6 @@ impl From<serde_json::Error> for MapError {
 /// over the real path. Readers of map.json (in this process or any other
 /// tool) never observe a partially-written file.
 fn persist(root: &Folder) -> Result<(), MapError> {
-    println!("persist running. root: {:#?}", root);
     let json = serde_json::to_string_pretty(root)?;
     fs::write(MAP_TMP_PATH, json)?;
     fs::rename(MAP_TMP_PATH, MAP_PATH)?;
@@ -328,7 +327,6 @@ impl MapStore {
 
         if let Some(pos) = folder.files.iter().position(|file| &file.uuid == file_uuid) {
             folder.files.remove(pos);
-            println!("map_write: {:#?}", map_write);
             persist(&mut map_write);
         };
 

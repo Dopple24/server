@@ -21,7 +21,6 @@ pub fn handle_client(
     public_links: &Arc<RwLock<LinkDatabase>>,
 ) {
     let mut buffer = [0u8; CHUNK_SIZE];
-    println!("right there");
     let buf_len = stream.read(&mut buffer).unwrap();
 
     let request_type = RequestType::get_type(buffer[0]);
@@ -37,7 +36,7 @@ pub fn handle_client(
             Some(val) => val,
             None => {
                 let buf = [48u8; 1];
-                stream.write_all(&buf);
+                let _ = stream.write_all(&buf);
                 return;
             }
         };
