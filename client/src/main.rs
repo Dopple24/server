@@ -124,13 +124,11 @@ fn main() -> std::io::Result<()> {
         "--delete" => {
             delete_file::delete(TcpStream::connect(SOCKET)?, &args[2], &args[3], &args[4])
         }
-        "--share_link" => share_link::share_link(
-            TcpStream::connect(SOCKET)?,
-            &args[2],
-            &args[3],
-            &args[4],
-            &args[5],
-        ),
+        "--share_link" => {
+            share_link::share_link(TcpStream::connect(SOCKET)?, &args[2], &args[3], &args[4], {
+                if args.len() > 5 { &args[5] } else { "1" }
+            })
+        }
         _ => {
             println!(
                 "Please enter an arg. Either --send for sending or --reinit for reinitialization"

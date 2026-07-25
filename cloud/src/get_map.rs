@@ -4,10 +4,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::{
-    file_transfer::CHUNK_SIZE,
-    mapper::{Fil, Folder, MapStore},
-};
+use crate::mapper::{Folder, MapStore};
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct FolderMap {

@@ -1,4 +1,5 @@
 use std::{
+    eprint,
     fs::OpenOptions,
     io::{Read, Write},
     net::TcpStream,
@@ -12,7 +13,10 @@ use argon2::{
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::file_transfer::CHUNK_SIZE;
+use crate::{
+    file_transfer::CHUNK_SIZE,
+    response::{Code, ErrorTransfer},
+};
 
 const DATABASE_LOCATION: &str = "./database.json";
 const NEW_DATABASE_LOCATION: &str = "./new_database.json";
@@ -159,33 +163,40 @@ pub fn register(
         Ok(val) => val,
         Err(e) => {
             let buf = [40u8; 1];
-            stream.write_all(&buf);
+            let _ = stream.write_all(&buf);
             return Err(e);
         }
     };
     if !has_admin_privileges(&admin_pass) {
         let buf = [44u8; 1];
-        stream.write_all(&buf);
+        let _ = stream.write_all(&buf);
         return Err(DatabaseError::Forbidden);
     }
     let mut database = match Database::load() {
         Ok(val) => val,
         Err(e) => {
             let buf = [50u8; 1];
-            stream.write_all(&buf);
+            let _ = stream.write_all(&buf);
             return Err(e);
         }
     };
     match database.new_user(&username, &pass) {
         Ok(_) => {
+            match database.save() {
+                Ok(_) => (),
+                Err(e) => {
+                    eprintln!("failed to save: {e:?}");
+                    let _ = stream.write_all(&[ErrorTransfer::InternalServerError.get_code()]);
+                    return Err(e);
+                }
+            };
             let buf = [20u8; 1];
-            stream.write_all(&buf);
-            database.save();
+            let _ = stream.write_all(&buf);
             Ok(())
         }
         Err(e) => {
             let buf = [41u8; 1];
-            stream.write_all(&buf);
+            let _ = stream.write_all(&buf);
             Err(e)
         }
     }

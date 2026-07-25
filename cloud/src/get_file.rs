@@ -1,23 +1,20 @@
 use std::collections::HashMap;
-use std::ffi::OsStr;
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Write};
-use std::iter::Map;
 use std::net::TcpStream;
-use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::thread::{self, Thread};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::{eprintln, println, thread};
 
 use blake3::{Hash, Hasher};
 use uuid::Uuid;
 
-use crate::auth::login_api;
+use crate::errors::is_connection_broken;
 use crate::file_transfer::CHUNK_SIZE;
-use crate::mapper::{Fil, MapStore, with_file_mut};
-use crate::response::ErrorTransfer;
+use crate::mapper::{MapStore, with_file_mut};
+use crate::response::{Code, ErrorTransfer};
 const OVERHEAD: usize = 11;
 
 struct Query {
@@ -53,44 +50,92 @@ pub fn send_file(
     client_uuid: &Uuid,
     offset: usize,
 ) {
+    println!("send_file called");
     let query = match Query::from_bytes(&first_message[offset..], buf_len) {
         Some(q) => q,
         None => {
             let buf = [48u8; 1];
-            stream.write_all(&buf);
+            let _ = stream.write_all(&buf);
             return;
         }
     };
-    println!("map_store: {:#?}", map_store);
+    println!("62");
+
     let path = match query.get_path(&map_store, client_uuid) {
         Ok(p) => p,
         Err(e) => {
             println!("error: {:?}", e);
-            let buf = [48u8; 1];
-            stream.write_all(&buf);
+            let _ = stream.write_all(&[e.get_code()]);
             return;
         }
     };
-    println!("map_store: {:#?}", map_store);
 
-    println!("path: {:?}", path);
-    let file_size = get_file_size(&path).unwrap();
+    let file = match File::open(&path) {
+        Ok(f) => f,
+        Err(e) => {
+            eprintln!("failed to open {path:?}: {e}");
+            let _ = stream.write_all(&[ErrorTransfer::InternalServerError.get_code()]);
+            return; // or continue / propagate, depending on caller context
+        }
+    };
+
+    let file_size = match file.metadata() {
+        Ok(meta) => meta.len(),
+        Err(e) => {
+            eprintln!("failed to get metadata for {path:?}: {e}");
+            let _ = stream.write_all(&[ErrorTransfer::InternalServerError.get_code()]);
+            return;
+        }
+    };
+
+    println!("91");
+
     let chunks_len = get_chunks_len(file_size);
-    let fil = Arc::new(File::open(&path).unwrap());
+    let fil = Arc::new(file);
 
-    println!("sending {:?}", chunks_len);
     let mut buf = [0u8; 5];
     buf[0] = 20;
     buf[1..5].copy_from_slice(&chunks_len.to_be_bytes());
-    stream.write_all(&buf).unwrap();
+
+    match stream.write_all(&buf) {
+        Ok(_) => (),
+        Err(e) if is_connection_broken(&e) => {
+            println!("connection broken");
+            return;
+        }
+        Err(e) => {
+            eprintln!("unexpected write error waiting for ready signal: {e}");
+            let _ = stream.write_all(&[ErrorTransfer::InternalServerError.get_code()]);
+            return;
+        }
+    }
+
+    println!("113");
 
     let mut resp = [0u8; CHUNK_SIZE];
 
-    stream.read(&mut resp);
-
-    if resp[0] != 20 {
-        return;
+    match stream.read(&mut resp) {
+        Ok(0) => {
+            println!("connection broken");
+            return;
+        }
+        Ok(_) => {
+            if resp[0] != 20 {
+                return;
+            }
+        }
+        Err(e) if is_connection_broken(&e) => {
+            println!("connection broken");
+            return;
+        }
+        Err(e) => {
+            eprintln!("unexpected read error waiting for ready signal: {e}");
+            let _ = stream.write_all(&[ErrorTransfer::InternalServerError.get_code()]);
+            return;
+        }
     }
+
+    println!("138");
 
     let arc_stream = Arc::new(Mutex::new(stream));
 
@@ -103,12 +148,17 @@ pub fn send_file(
         None,
     );
 
-    println!("map_store before unlock: {:#?}", map_store);
+    println!("153");
 
-    with_file_mut(&query.file_uuid, &map_store, client_uuid, |fil| {
+    match with_file_mut(&query.file_uuid, &map_store, client_uuid, |fil| {
         fil.unlock()
-    })
-    .unwrap();
+    }) {
+        Ok(_) => (),
+        Err(e) => eprintln!(
+            "failed to unlock file: {:?}. error: {e:?}",
+            &query.file_uuid
+        ),
+    }
 }
 
 pub fn reinit_send_file(
@@ -124,36 +174,76 @@ pub fn reinit_send_file(
         Some(q) => q,
         None => {
             let buf = [48u8; 1];
-            stream.write_all(&buf);
+            let _ = stream.write_all(&buf);
             return;
         }
     };
+
     let path = match query.get_path(&map_store, client_uuid) {
         Ok(p) => p,
         Err(e) => {
             println!("error: {:?}", e);
-            let buf = [48u8; 1];
-            stream.write_all(&buf);
+            let _ = stream.write_all(&[e.get_code()]);
             return;
         }
     };
-    println!("path: {:?}", path);
-    let file_size = get_file_size(&path).unwrap();
+    let file = match File::open(&path) {
+        Ok(f) => f,
+        Err(e) => {
+            eprintln!("failed to open {path:?}: {e}");
+            let _ = stream.write_all(&[ErrorTransfer::InternalServerError.get_code()]);
+            return; // or continue / propagate, depending on caller context
+        }
+    };
+    let file_size = match file.metadata() {
+        Ok(meta) => meta.len(),
+        Err(e) => {
+            eprintln!("failed to get metadata for {path:?}: {e}");
+            let _ = stream.write_all(&[ErrorTransfer::InternalServerError.get_code()]);
+            return;
+        }
+    };
     let chunks_len = get_chunks_len(file_size);
-    let fil = Arc::new(File::open(&path).unwrap());
+    let fil = Arc::new(file);
 
-    println!("sending {:?}", chunks_len);
     let mut buf = [0u8; 5];
     buf[0] = 20;
     buf[1..5].copy_from_slice(&chunks_len.to_be_bytes());
-    stream.write_all(&buf).unwrap();
+
+    match stream.write_all(&buf) {
+        Ok(_) => (),
+        Err(e) if is_connection_broken(&e) => {
+            println!("connection broken");
+            return;
+        }
+        Err(e) => {
+            eprintln!("unexpected read error waiting for ready signal: {e}");
+            let _ = stream.write_all(&[ErrorTransfer::InternalServerError.get_code()]);
+            return;
+        }
+    }
 
     let mut resp = [0u8; CHUNK_SIZE];
 
-    stream.read(&mut resp);
-
-    if resp[0] != 20 {
-        return;
+    match stream.read(&mut resp) {
+        Ok(0) => {
+            println!("connection broken");
+            return;
+        }
+        Ok(_) => {
+            if resp[0] != 20 {
+                return;
+            }
+        }
+        Err(e) if is_connection_broken(&e) => {
+            println!("connection broken");
+            return;
+        }
+        Err(e) => {
+            eprintln!("unexpected read error waiting for ready signal: {e}");
+            let _ = stream.write_all(&[ErrorTransfer::InternalServerError.get_code()]);
+            return;
+        }
     }
 
     let arc_stream = Arc::new(Mutex::new(stream));
@@ -170,10 +260,15 @@ pub fn reinit_send_file(
         Some(chunks_to_send),
     );
 
-    with_file_mut(&query.file_uuid, &map_store, client_uuid, |fil| {
+    match with_file_mut(&query.file_uuid, &map_store, client_uuid, |fil| {
         fil.unlock()
-    })
-    .unwrap();
+    }) {
+        Ok(_) => (),
+        Err(e) => eprintln!(
+            "failed to unlock file: {:?}. error: {e:?}",
+            &query.file_uuid
+        ),
+    }
 }
 
 pub fn workers_send(
@@ -195,7 +290,10 @@ pub fn workers_send(
         None => {
             let c_to_send = Arc::new(Mutex::new(Vec::new()));
             {
-                let mut lock = c_to_send.lock().unwrap();
+                let mut lock = c_to_send.lock().unwrap_or_else(|lock| {
+                    eprintln!("c_to_send was poisoned: {lock:?}");
+                    lock.into_inner()
+                });
                 for i in 1..chunks_len {
                     lock.push(i as u64);
                 }
@@ -205,7 +303,15 @@ pub fn workers_send(
     };
 
     {
-        arc_stream.lock().unwrap().set_nonblocking(true).unwrap();
+        let guard = arc_stream.lock().unwrap_or_else(|e| {
+            eprintln!("arc_stream was poisoned: {e:?}");
+            e.into_inner()
+        });
+
+        if let Err(e) = guard.set_nonblocking(true) {
+            eprintln!("failed to set non-blocking mode: {e}");
+            return;
+        }
     }
 
     loop {
@@ -222,7 +328,15 @@ pub fn workers_send(
                 let mut counter = 0;
                 loop {
                     counter = check_timeout_in_flight(&in_flight, &chunks_in_flight, counter);
-                    match { chunks.lock().unwrap().pop() } {
+                    match {
+                        chunks
+                            .lock()
+                            .unwrap_or_else(|e| {
+                                eprintln!("chunks was poisoned: {e:?}");
+                                e.into_inner()
+                            })
+                            .pop()
+                    } {
                         Some(c) => send_chunk(
                             &chunks_in_flight,
                             &arc_stream,
@@ -232,31 +346,55 @@ pub fn workers_send(
                             file_size,
                         ),
                         None => {
-                            *dead_threads.lock().unwrap() += 1;
+                            *dead_threads.lock().unwrap_or_else(|e| {
+                                eprintln!("dead_threads was poisoned: {e:?}");
+                                e.into_inner()
+                            }) += 1;
                             break;
                         }
                     };
                 }
             }));
         }
-        reader(
+        match reader(
             &arc_stream,
             &chunks_in_flight,
             &in_flight,
             &dead_threads,
             workers,
-        );
+        ) {
+            Ok(_) => (),
+            Err(e) => {
+                eprintln!("reader failed: {e:?}");
+                return;
+            }
+        };
 
-        handles.into_iter().for_each(|handle| {
-            handle.join();
-        });
+        println!("367");
+
+        for handle in handles {
+            match handle.join() {
+                Ok(_) => (),
+                Err(panic_payload) => {
+                    let msg = panic_payload
+                        .downcast_ref::<&str>()
+                        .map(|s| s.to_string())
+                        .or_else(|| panic_payload.downcast_ref::<String>().cloned())
+                        .unwrap_or_else(|| "unknown panic payload".to_string());
+                    eprintln!("a thread panicked: {msg}");
+                }
+            }
+        }
 
         if confirm_completion(&arc_stream, &chunks_to_send) {
             break;
         };
     }
 
-    let mut stream = arc_stream.lock().unwrap();
+    let mut stream = arc_stream.lock().unwrap_or_else(|e| {
+        eprintln!("arc_stream was poisoned: {e:?}");
+        e.into_inner()
+    });
 
     loop {
         let mut buf = [0u8; 1];
@@ -270,19 +408,39 @@ pub fn workers_send(
                     println!("44 header: {} not found", val);
                 }
             },
-            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                thread::sleep(Duration::from_millis(10));
+            }
             Err(_) => {
                 println!("44 header: {} not found", buf[0]);
+                let _ = stream.write_all(&[ErrorTransfer::InternalServerError.get_code()]);
+                return;
             }
         };
     }
 
-    let mut file_hash_buf: [u8; 32] = hash_file(fil).unwrap().try_into().unwrap();
+    let hash = match hash_file(fil) {
+        Ok(hash) => hash,
+        Err(e) => {
+            eprintln!("hashing failed: {e:?}");
+            let _ = stream.write_all(&[ErrorTransfer::InternalServerError.get_code()]);
+            return;
+        }
+    };
+
+    let mut file_hash_buf: [u8; 32] = match hash.try_into() {
+        Ok(h) => h,
+        Err(e) => {
+            eprintln!("invalid hash: {e:?}");
+            let _ = stream.write_all(&[ErrorTransfer::InternalServerError.get_code()]);
+            return;
+        }
+    };
     let mut buf = vec![0u8; 33];
     buf[1..].copy_from_slice(&mut file_hash_buf);
     buf[0] = 4;
 
-    stream.write_all(&buf).unwrap();
+    let _ = stream.write_all(&buf);
 
     println!("sent {:?}", buf);
 
@@ -299,18 +457,33 @@ pub fn workers_send(
                     println!("44 header: {} not found", 44);
                     if attempts < 5 {
                         println!("trying to send a completion check again, attempt: {attempts}");
-                        stream.write_all(&file_hash_buf).unwrap();
+                        match stream.write_all(&file_hash_buf) {
+                            Ok(_) => (),
+                            Err(e) if is_connection_broken(&e) => {
+                                println!("connection broken");
+                                return;
+                            }
+                            Err(e) => {
+                                eprintln!("unexpected read error waiting for ready signal: {e}");
+                            }
+                        }
                         println!("sent: {:?}", &file_hash_buf);
                         attempts += 1;
+                    } else {
+                        let _ = stream.write_all(&[ErrorTransfer::InternalServerError.get_code()]);
+                        return;
                     }
                 }
                 val => {
                     println!("44 header: {} not found", val);
                 }
             },
-            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                thread::sleep(Duration::from_millis(10));
+            }
             Err(_) => {
-                println!("44 header: {} not found", buf[0]);
+                println!("44 header: {} not found. Leaving", buf[0]);
+                return;
             }
         };
     }
@@ -323,13 +496,23 @@ fn confirm_completion(
 ) -> bool {
     let mut buf = vec![0u8; 1];
     buf[0] = 3;
-    let mut stream = arc_stream.lock().unwrap();
+    let mut stream = arc_stream.lock().unwrap_or_else(|e| {
+        eprintln!("arc_stream was poisoned: {e:?}");
+        e.into_inner()
+    });
 
-    stream.write_all(&buf).unwrap();
-
-    println!("sent");
-
-    // client: read count first
+    match stream.write_all(&buf) {
+        Ok(_) => (),
+        Err(e) if is_connection_broken(&e) => {
+            println!("connection broken");
+            return false;
+        }
+        Err(e) => {
+            eprintln!("unexpected write error waiting for ready signal: {e}");
+            let _ = stream.write_all(&[ErrorTransfer::InternalServerError.get_code()]);
+            return false;
+        }
+    }
 
     let mut response_code = [0u8; 1];
     loop {
@@ -346,37 +529,51 @@ fn confirm_completion(
             }
             Err(e) => {
                 eprintln!("{}", e);
+                let _ = stream.write_all(&[ErrorTransfer::InternalServerError.get_code()]);
+                return false;
             }
         };
     }
 
     let mut count_buf = vec![0u8; 8];
 
-    stream
-        .read_exact(&mut count_buf)
-        .map_err(|e| return e)
-        .unwrap();
+    match stream.read_exact(&mut count_buf).map_err(|e| return e) {
+        Ok(_) => (),
+        Err(e) => {
+            let _ = stream.write_all(&[ErrorTransfer::InternalServerError.get_code()]);
+            println!("unexpected fail to read: {e:?}");
+            return false;
+        }
+    };
 
     let count = u64::from_be_bytes(count_buf.try_into().unwrap());
-
-    println!("total missing: {:?}", count);
 
     if count == 0 {
         return true;
     }
 
-    // then read exactly count * 8 bytes
     let mut missing_buf = vec![0u8; count as usize * 8];
-    stream
-        .read_exact(&mut missing_buf)
-        .map_err(|e| return e)
-        .unwrap();
+
+    match stream.read_exact(&mut missing_buf).map_err(|e| return e) {
+        Ok(_) => (),
+        Err(e) => {
+            let _ = stream.write_all(&[ErrorTransfer::InternalServerError.get_code()]);
+            println!("unexpected fail to read: {e:?}");
+            return false;
+        }
+    };
 
     let mut missing = Vec::new();
     for chunk in missing_buf.chunks_exact(8) {
         missing.push(u64::from_be_bytes(chunk.try_into().unwrap()));
     }
-    chunks_to_send.lock().unwrap().append(&mut missing);
+    chunks_to_send
+        .lock()
+        .unwrap_or_else(|e| {
+            eprintln!("chunks_to_send was poisoned: {e:?}");
+            e.into_inner()
+        })
+        .append(&mut missing);
 
     false
 }
@@ -387,33 +584,57 @@ fn reader(
     in_flight: &Arc<Mutex<isize>>,
     dead_threads: &Arc<Mutex<usize>>,
     workers: usize,
-) {
-    let mut in_f: isize = { in_flight.lock().unwrap().clone() };
-    while workers > *dead_threads.lock().unwrap() || in_f > 0 {
+) -> Result<(), ErrorTransfer> {
+    let mut in_f: isize = {
+        in_flight
+            .lock()
+            .unwrap_or_else(|e| {
+                eprintln!("arc_stream was poisoned: {e:?}");
+                e.into_inner()
+            })
+            .clone()
+    };
+    while workers
+        > *dead_threads.lock().unwrap_or_else(|e| {
+            eprintln!("arc_stream was poisoned: {e:?}");
+            e.into_inner()
+        })
+        || in_f > 0
+    {
         let mut resp = [0u8; 16];
 
         let n = {
-            let mut stream = arc_stream.lock().unwrap();
+            let mut stream = arc_stream.lock().unwrap_or_else(|e| {
+                eprintln!("arc_stream was poisoned: {e:?}");
+                e.into_inner()
+            });
             stream.read(&mut resp)
         };
 
         match n {
             Ok(0) => {
                 println!("closed");
-                break;
+                return Err(ErrorTransfer::Closed);
             } // connection closed
             Ok(_) => {
                 if resp[0] != 0 {
                     println!("{:?}", resp[0]);
                     if resp[0] == 20 {
                         let id = u64::from_be_bytes(resp[8..].try_into().unwrap());
-                        chunks_in_flight.lock().unwrap().remove(&id);
+                        chunks_in_flight
+                            .lock()
+                            .unwrap_or_else(|e| {
+                                eprintln!("chunks_in_flight was poisoned: {e:?}");
+                                e.into_inner()
+                            })
+                            .remove(&id);
                     }
 
-                    *in_flight.lock().unwrap() -= 1;
-                    println!("subtracted");
+                    *in_flight.lock().unwrap_or_else(|e| {
+                        eprintln!("in_flight was poisoned: {e:?}");
+                        e.into_inner()
+                    }) -= 1;
                 } else {
-                    println!("{:?}", resp);
                     std::thread::sleep(std::time::Duration::from_millis(10));
                     continue;
                 }
@@ -424,11 +645,19 @@ fn reader(
             }
             Err(e) => {
                 eprintln!("{}", e);
+                return Err(ErrorTransfer::Closed);
             }
         }
 
-        in_f = in_flight.lock().unwrap().clone();
+        in_f = in_flight
+            .lock()
+            .unwrap_or_else(|e| {
+                eprintln!("in_flight was poisoned: {e:?}");
+                e.into_inner()
+            })
+            .clone();
     }
+    Ok(())
 }
 
 fn check_timeout_in_flight(
@@ -436,20 +665,33 @@ fn check_timeout_in_flight(
     chunks_in_flight: &Arc<Mutex<HashMap<u64, Duration>>>,
     mut counter: usize,
 ) -> usize {
-    if in_flight.lock().unwrap().clone() > 5 {
+    if in_flight
+        .lock()
+        .unwrap_or_else(|e| {
+            eprintln!("in_flight was poisoned: {e:?}");
+            e.into_inner()
+        })
+        .clone()
+        > 5
+    {
         counter += 1;
         thread::sleep(Duration::from_millis(50));
         if counter >= 10 {
             let mut now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
             let removed: Vec<(u64, Duration)> = chunks_in_flight
                 .lock()
-                .unwrap()
+                .unwrap_or_else(|e| {
+                    eprintln!("chunks_in_flight was poisoned: {e:?}");
+                    e.into_inner()
+                })
                 .extract_if(|_k, value| value < &mut now)
                 .collect();
             counter = 0;
-            let mut in_f = in_flight.lock().unwrap();
+            let mut in_f = in_flight.lock().unwrap_or_else(|e| {
+                eprintln!("in_flight was poisoned: {e:?}");
+                e.into_inner()
+            });
             *in_f -= removed.len() as isize;
-            println!("in flight: {in_f}");
         }
     }
     counter
@@ -467,8 +709,16 @@ fn send_chunk(
     let chunk_size = remaining.min((CHUNK_SIZE - OVERHEAD) as u64) as usize;
 
     let mut buf = vec![0u8; chunk_size];
-    fil.read_at(&mut buf, (CHUNK_SIZE - OVERHEAD) as u64 * id)
-        .unwrap();
+    match fil.read_at(&mut buf, (CHUNK_SIZE - OVERHEAD) as u64 * id) {
+        Ok(_) => (),
+        Err(e) => {
+            eprintln!(
+                "failed to read chunk {id} at offset {}: {e}",
+                (CHUNK_SIZE - OVERHEAD) as u64 * id
+            );
+            return;
+        }
+    };
 
     let timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -485,21 +735,36 @@ fn send_chunk(
     buffer.extend_from_slice(&chunk_size.to_be_bytes());
     buffer.extend_from_slice(&buf);
 
-    println!(
-        "sending: 2, {:?}, {:?}, {chunk_size}",
-        &transfer_id.to_be_bytes(),
-        &chunk_size.to_be_bytes(),
-    );
     {
-        println!("started writing");
-        let mut lock = stream.lock().unwrap();
-        lock.write_all(&buffer).unwrap();
-        println!("stopped writing");
+        let mut lock = stream.lock().unwrap_or_else(|e| {
+            eprintln!("stream was poisoned: {e:?}");
+            e.into_inner()
+        });
+        match lock.write_all(&buffer) {
+            Ok(_) => (),
+            Err(e) if is_connection_broken(&e) => {
+                println!("connection broken");
+                return;
+            }
+            Err(e) => {
+                eprintln!("unexpected write error: {e}");
+                let _ = lock.write_all(&[ErrorTransfer::InternalServerError.get_code()]);
+                return;
+            }
+        };
     }
 
-    let _ = chunks_in_flight.lock().unwrap().insert(id, timestamp);
-    *in_flight.lock().unwrap() += 1;
-    println!("in_flight is now: {:?}", in_flight.lock().unwrap());
+    let _ = chunks_in_flight
+        .lock()
+        .unwrap_or_else(|lock| {
+            eprintln!("chunks_in_flight was poisoned: {lock:?}");
+            lock.into_inner()
+        })
+        .insert(id, timestamp);
+    *in_flight.lock().unwrap_or_else(|lock| {
+        eprintln!("in_flight was poisoned: {lock:?}");
+        lock.into_inner()
+    }) += 1;
 }
 
 pub fn get_file_size(path: &Path) -> Result<u64, ErrorTransfer> {
@@ -510,9 +775,8 @@ pub fn get_file_size(path: &Path) -> Result<u64, ErrorTransfer> {
 
     let size = match file.metadata() {
         Ok(md) => md.len(),
-        Err(_) => return Err(ErrorTransfer::InternalServerError),
+        Err(_) => return Err(ErrorTransfer::NotFound),
     };
-    println!("size: {size}");
     Ok(size)
 }
 

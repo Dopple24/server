@@ -44,6 +44,7 @@ pub enum ErrorTransfer {
     Forbidden,
     Locked,
     InvalidRequest,
+    Closed,
 }
 
 impl Code for ErrorTransfer {
@@ -62,6 +63,7 @@ impl Code for ErrorTransfer {
             Self::InternalServerError => 50,
             Self::TooFast => 51,
             Self::Locked => 53,
+            Self::Closed => 10,
         }
     }
     fn get_message(&self) -> Vec<u8> {
@@ -80,6 +82,7 @@ impl Code for ErrorTransfer {
             Self::InternalServerError => "50 internal server error".to_string(),
             Self::TooFast => "51 too fast".to_string(),
             Self::Locked => "53 requested file is locked".to_string(),
+            Self::Closed => "10 closed".to_string(),
         };
         buffer.extend_from_slice(msg.as_bytes());
         buffer

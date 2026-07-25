@@ -2,7 +2,6 @@ use crate::errors::is_connection_broken;
 use crate::mapper::Fil;
 use crate::mapper::MapStore;
 use crate::response;
-use crate::response::ErrorTransfer::InternalServerError;
 use crate::response::{Code, ErrorTransfer, TransferSuccess};
 use blake3::{Hash, Hasher};
 use serde::{Deserialize, Serialize};
@@ -84,12 +83,9 @@ pub fn reinitialize(
     offset: usize,
 ) {
     println!("reinitialization called");
-    println!(
-        "uuid bytes: {:?}",
-        first_message[offset..16 + offset].to_vec()
-    );
+
     let uuid = Uuid::from_bytes(first_message[offset..16 + offset].try_into().unwrap());
-    println!("uuid: {:?}", uuid);
+
     let mut files: Vec<PathBuf> = Vec::new();
 
     let temp_location = Path::new(TEMP_FOLDER_LOCATION);

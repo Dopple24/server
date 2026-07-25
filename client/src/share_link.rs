@@ -35,6 +35,8 @@ pub fn share_link(
         .expect("time went backwards")
         .as_secs() as i64;
 
+    println!("timestamp: {hours:?}");
+
     stream.write_all(&first_message(100, &file_uuid, username, pass, timestamp));
     let mut buf = [0u8; 17];
     stream.read_exact(&mut buf);
