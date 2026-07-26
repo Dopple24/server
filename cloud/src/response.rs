@@ -30,6 +30,7 @@ impl Code for TransferSuccess {
 }
 
 #[derive(Debug)]
+#[allow(dead_code)]
 pub enum ErrorTransfer {
     InvalidLength,
     InvalidHash,

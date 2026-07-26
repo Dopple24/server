@@ -1,7 +1,7 @@
 use chrono::{DateTime, Local, Utc};
 use serde::{Deserialize, Serialize};
 use std::{
-    fs, io,
+    eprintln, fs, io,
     path::{Path, PathBuf},
     sync::{Arc, RwLock, RwLockReadGuard},
 };
@@ -23,16 +23,6 @@ pub struct AccessControl {
 }
 
 impl AccessControl {
-    pub fn new(owner: Uuid) -> Self {
-        AccessControl {
-            owner,
-            is_public_for_viewing: false,
-            is_public_for_changing: false,
-            is_visible_for: Vec::new(),
-            is_editable_for: Vec::new(),
-        }
-    }
-
     pub fn can_view(&self, user: &Uuid) -> bool {
         self.is_public_for_viewing
             || &self.owner == user
@@ -104,15 +94,14 @@ impl Fil {
             }
         }
     }
-    pub fn lock_unchecked(&mut self) {
-        self.is_locked = true;
-    }
+
     pub fn unlock(&mut self) {
         self.is_locked = false;
     }
 }
 
 impl Folder {
+    #[allow(dead_code)]
     fn scan(path: &Path, owner: Uuid) -> io::Result<Folder> {
         let meta = fs::metadata(path)?;
         let last_changed_at: DateTime<Utc> = meta.modified()?.into();
@@ -228,8 +217,11 @@ impl Folder {
 
 #[derive(Debug)]
 pub enum MapError {
+    #[allow(dead_code)]
     Io(io::Error),
+    #[allow(dead_code)]
     Json(serde_json::Error),
+    #[allow(dead_code)]
     FolderNotFound(Uuid),
     /// Another thread poisoned the lock by panicking while holding it.
     Poisoned,
@@ -283,6 +275,7 @@ impl MapStore {
     /// Rebuilds the map from `path` on disk, replacing the in-memory map
     /// and persisting it. Takes the write lock for the whole operation,
     /// so no reads or other writes can interleave.
+    #[allow(dead_code)]
     pub fn map_new(&self, path: &PathBuf) -> Result<(), MapError> {
         let owner = Uuid::new_v4();
         let new_root = Folder::scan(path, owner)?;
@@ -291,7 +284,6 @@ impl MapStore {
         persist(&new_root)?;
         *guard = new_root;
         Ok(())
-        // write guard dropped here -> readers/writers unblocked
     }
 
     /// Inserts `file` into the folder identified by `folder_uuid` (or the
@@ -318,7 +310,7 @@ impl MapStore {
 
     pub fn remove_file(&self, file_uuid: &Uuid, client_uuid: &Uuid) -> Result<(), ErrorTransfer> {
         let mut map_write = self.inner.write().unwrap();
-        let mut folder = match map_write.find_file_parent(file_uuid, client_uuid) {
+        let folder = match map_write.find_file_parent(file_uuid, client_uuid) {
             Ok(f) => f,
             Err(e) => {
                 return Err(e);
@@ -327,7 +319,13 @@ impl MapStore {
 
         if let Some(pos) = folder.files.iter().position(|file| &file.uuid == file_uuid) {
             folder.files.remove(pos);
-            persist(&mut map_write);
+            match persist(&mut map_write) {
+                Ok(_) => (),
+                Err(e) => {
+                    eprintln!("failed to persist: {e:?}");
+                    return Err(ErrorTransfer::InternalServerError);
+                }
+            };
         };
 
         Ok(())

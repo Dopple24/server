@@ -370,8 +370,6 @@ pub fn workers_send(
             }
         };
 
-        println!("367");
-
         for handle in handles {
             match handle.join() {
                 Ok(_) => (),

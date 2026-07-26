@@ -1,10 +1,11 @@
 use std::{
+    eprintln,
     io::Write,
     net::TcpStream,
     path::Path,
     println,
     sync::{Arc, RwLock},
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use serde::{Deserialize, Serialize};
@@ -16,7 +17,7 @@ const TEMP_PUBLIC_LINKS_PATH: &str = "./public_links.json.temp";
 use crate::{
     file_transfer::CHUNK_SIZE,
     mapper::MapStore,
-    response::{Code, TransferSuccess},
+    response::{Code, ErrorTransfer, TransferSuccess},
 };
 
 #[derive(Deserialize, Serialize, Debug)]
@@ -80,7 +81,12 @@ impl LinkDatabase {
         self.save()
     }
     pub fn get_file_uuid(&mut self, token: &Uuid) -> Option<Uuid> {
-        self.cleanup();
+        match self.cleanup() {
+            Ok(_) => (),
+            Err(e) => {
+                eprintln!("failed to cleanup: {e:?}. Carrying on");
+            }
+        };
         match self.links.iter().find(|link| &link.token == token) {
             Some(link) => Some(link.file_uuid),
             None => None,
@@ -96,15 +102,20 @@ pub fn share_link(
     offset: usize,
     public_links: &Arc<RwLock<LinkDatabase>>,
 ) {
-    println!("share_link called");
-    println!("public links: {:?}", public_links);
     let file_uuid = Uuid::from_bytes(first_message[offset..offset + 16].try_into().unwrap());
-    let map_read = map_store.read().unwrap();
+    let map_read = match map_store.read() {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("failed to get read on map_store: {e:?}");
+            let _ = stream.write_all(&[ErrorTransfer::InternalServerError.get_code()]);
+            return;
+        }
+    };
     match map_read.find_file_clone(&file_uuid, client_uuid) {
         Ok(f) => f,
         Err(e) => {
             println!("share link failed: {:?}", e);
-            stream.write_all(&[e.get_code()]);
+            let _ = stream.write_all(&[e.get_code()]);
             return;
         }
     };
@@ -121,10 +132,19 @@ pub fn share_link(
     response_buf[0] = TransferSuccess::Ok.get_code();
     response_buf[1..].copy_from_slice(token.as_bytes());
 
-    let mut links_write = public_links.write().unwrap();
-    println!(
-        "{:?}",
-        links_write.add(PublicLink::new(file_uuid, valid_until, token))
-    );
-    stream.write_all(&response_buf);
+    let mut links_write = public_links.write().unwrap_or_else(|pl| {
+        eprintln!("public_links was poisoned");
+        pl.into_inner()
+    });
+
+    match links_write.add(PublicLink::new(file_uuid, valid_until, token)) {
+        Ok(_) => (),
+        Err(e) => {
+            eprintln!("failed to add link to links: {e:?}");
+            let _ = stream.write_all(&[ErrorTransfer::InternalServerError.get_code()]);
+            return;
+        }
+    };
+
+    let _ = stream.write_all(&response_buf);
 }

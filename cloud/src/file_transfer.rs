@@ -748,7 +748,9 @@ fn init_stream_reader(
                     let _ = stream.write_all(&[ErrorTransfer::NotFound.get_code()]);
                 }
             }
-            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                thread::sleep(Duration::from_millis(10));
+            }
             Err(e) => {
                 eprintln!("read error: {e}");
                 break;

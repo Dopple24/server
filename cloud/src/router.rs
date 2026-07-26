@@ -81,7 +81,7 @@ pub fn handle_client(
             }
             _ => {
                 println!("shuting down");
-                stream.shutdown(std::net::Shutdown::Both);
+                let _ = stream.shutdown(std::net::Shutdown::Both);
                 return;
             }
         };
