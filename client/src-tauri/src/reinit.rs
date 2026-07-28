@@ -13,7 +13,9 @@ use std::{
 };
 use uuid::Uuid;
 
-use crate::{CHUNK_SIZE, MAX_THREADS, NEW_PARTS_PATH, OVERHEAD, PARTS_PATH, hash_file, send_chunk};
+use crate::app::{
+    hash_file, send_chunk, CHUNK_SIZE, MAX_THREADS, NEW_PARTS_PATH, OVERHEAD, PARTS_PATH,
+};
 
 pub enum PartsError {
     FailedToSave,
@@ -95,7 +97,7 @@ pub fn reinit(
             parts_lock.send[0].uuid.clone(),
         )
     };
-    let file_size = crate::get_file_size(Path::new(&filename)).unwrap();
+    let file_size = crate::app::get_file_size(Path::new(&filename)).unwrap();
     let first_message = first_message(10, &uuid, username, password);
     println!("uuid: {:?}", uuid);
     stream.write_all(&first_message)?;

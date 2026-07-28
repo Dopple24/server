@@ -1,5 +1,6 @@
-use crate::reinit::{PartSend, Parts, reinit};
+use crate::reinit::{reinit, PartSend, Parts};
 use crate::request_file::request;
+use crate::{auth, delete_file, get_map, guest_request_file, request_file, share_link};
 use blake3::{Hash, Hasher};
 use std::collections::HashMap;
 use std::env::args;
@@ -17,24 +18,15 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tiny_http::Server;
 use uuid::Uuid;
 
-mod auth;
-mod delete_file;
-mod get_map;
-mod guest_request_file;
-mod reinit;
-mod request_file;
-mod response;
-mod share_link;
-
-const CHUNK_SIZE: usize = 32768;
-const OVERHEAD: usize = 11;
-const MAX_THREADS: u64 = 5;
-const PARTS_PATH: &str = "./parts.json";
-const NEW_PARTS_PATH: &str = "./parts.json.new";
-const SOCKET: &str = "127.0.0.1:6543";
+pub const CHUNK_SIZE: usize = 32768;
+pub const OVERHEAD: usize = 11;
+pub const MAX_THREADS: u64 = 5;
+pub const PARTS_PATH: &str = "./parts.json";
+pub const NEW_PARTS_PATH: &str = "./parts.json.new";
+pub const SOCKET: &str = "127.0.0.1:6543";
 
 #[derive(Debug)]
-enum TransferError {
+pub enum TransferError {
     InvalidLength,
     InvalidUuid,
     Overflow,
@@ -126,7 +118,11 @@ fn main() -> std::io::Result<()> {
         }
         "--share_link" => {
             share_link::share_link(TcpStream::connect(SOCKET)?, &args[2], &args[3], &args[4], {
-                if args.len() > 5 { &args[5] } else { "1" }
+                if args.len() > 5 {
+                    &args[5]
+                } else {
+                    "1"
+                }
             })
         }
         _ => {
@@ -462,7 +458,7 @@ fn sending(
     Ok(())
 }
 
-fn get_file_size(path: &Path) -> Result<u64, TransferError> {
+pub fn get_file_size(path: &Path) -> Result<u64, TransferError> {
     let file = match OpenOptions::new().read(true).open(path) {
         Ok(file) => file,
         Err(_) => return Err(TransferError::FileNotFound),
@@ -536,7 +532,7 @@ fn send(
     Ok(resp)
 }
 
-fn send_chunk(stream: &Arc<Mutex<TcpStream>>, id: u64, data: &[u8]) -> Result<(), Error> {
+pub fn send_chunk(stream: &Arc<Mutex<TcpStream>>, id: u64, data: &[u8]) -> Result<(), Error> {
     let transfer_id: u64 = id;
     let msg = data;
 
@@ -565,7 +561,7 @@ fn send_chunk(stream: &Arc<Mutex<TcpStream>>, id: u64, data: &[u8]) -> Result<()
     Ok(())
 }
 
-fn hash_file(file: Arc<File>) -> io::Result<Hash> {
+pub fn hash_file(file: Arc<File>) -> io::Result<Hash> {
     let mut hasher = Hasher::new();
     let mut buf = [0u8; 65536];
     let mut file = match Arc::try_unwrap(file) {

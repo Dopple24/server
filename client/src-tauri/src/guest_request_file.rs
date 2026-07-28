@@ -6,7 +6,7 @@ use std::{
 
 use uuid::Uuid;
 
-use crate::{SOCKET, request_file::CHUNK_SIZE};
+use crate::app::{CHUNK_SIZE, SOCKET};
 
 use tiny_http::{Header, Request, Response, StatusCode};
 

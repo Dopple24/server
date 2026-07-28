@@ -1,0 +1,29 @@
+<!doctype html>
+<html>
+    <head>
+        <title>My App</title>
+    </head>
+    <body>
+        <button id="run-btn">Run Task</button>
+        <button id="greet-btn">Greet</button>
+        <p id="output"></p>
+
+        <script>
+            const { invoke } = window.__TAURI__.core;
+
+            document
+                .getElementById("run-btn")
+                .addEventListener("click", async () => {
+                    const result = await invoke("run_task");
+                    document.getElementById("output").textContent = result;
+                });
+
+            document
+                .getElementById("greet-btn")
+                .addEventListener("click", async () => {
+                    const result = await invoke("greet", { name: "World" });
+                    document.getElementById("output").textContent = result;
+                });
+        </script>
+    </body>
+</html>
