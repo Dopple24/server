@@ -15,6 +15,7 @@ use std::sync::{Arc, Mutex, RwLock};
 use std::thread;
 use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
+use tauri::State;
 use tiny_http::Server;
 use uuid::Uuid;
 
@@ -67,14 +68,13 @@ fn main() -> std::io::Result<()> {
             }
             Ok(())
         }
-        "--send" => sending(
+        /*"--send" => sending(
             TcpStream::connect(SOCKET)?,
             "./test.txt",
-            "test.txt",
-            &parts,
+            parts,
             &args[2],
             &args[3],
-        ),
+        ),*/
         "--reinit" => reinit(TcpStream::connect(SOCKET)?, &parts, &args[2], &args[3]),
         "--get" => {
             if args.len() < 5 {
@@ -97,7 +97,10 @@ fn main() -> std::io::Result<()> {
         "--get_reinit" => {
             request_file::reinitialize(TcpStream::connect(SOCKET)?, &parts, 10, &args[2], &args[3])
         }
-        "--get_map" => get_map::get_map(TcpStream::connect(SOCKET)?, &args[2], &args[3]),
+        "--get_map" => {
+            get_map::get_map(TcpStream::connect(SOCKET)?, &args[2], &args[3]);
+            Ok(())
+        }
         "--register" => {
             if args.len() < 5 {
                 println!(
@@ -134,7 +137,7 @@ fn main() -> std::io::Result<()> {
     }
 }
 
-fn get_parts_rw_lock() -> Arc<RwLock<Parts>> {
+pub fn get_parts_rw_lock() -> Arc<RwLock<Parts>> {
     let mut file = OpenOptions::new()
         .read(true)
         .write(true)
@@ -161,24 +164,39 @@ fn get_parts_rw_lock() -> Arc<RwLock<Parts>> {
     ))
 }
 
-fn sending(
+pub fn sending(
     mut stream: TcpStream,
-    path: &str,
-    filename: &str,
-    parts: &Arc<RwLock<Parts>>,
+    path_str: &str,
+    parts: State<Arc<RwLock<Parts>>>,
     username: &str,
     password: &str,
+    folder_uuid: &str,
 ) -> std::io::Result<()> {
+    println!("{folder_uuid}");
+    let path = Path::new(path_str);
+
+    // Or with a default fallback:
+    let filename = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
+
     println!("path {:?}", Path::new(path));
     let file_size = get_file_size(Path::new(path)).unwrap();
     let transfer_uuid = Uuid::new_v4();
+    let folder_uuid = match Uuid::from_str(folder_uuid) {
+        Ok(u) => u,
+        Err(e) => {
+            eprintln!("failed to get uuid from str: {e:?}");
+            return Err(Error::last_os_error());
+        }
+    };
+    println!("folder_uuid: {folder_uuid:?}");
     let resp = send(
         &mut stream,
         file_size,
-        path.as_bytes(),
+        path_str.as_bytes(),
         username,
         password,
         &transfer_uuid,
+        &folder_uuid,
     )?;
 
     println!("response code: {:?}", &resp.clone()[0]);
@@ -198,7 +216,7 @@ fn sending(
         parts_write.save();
     }
 
-    let fil = Arc::new(File::open("./test.txt").unwrap());
+    let fil = Arc::new(File::open(path_str).unwrap());
 
     let chunks_len = (file_size / (CHUNK_SIZE - OVERHEAD) as u64) + 1;
 
@@ -490,6 +508,7 @@ fn send(
     username: &str,
     password: &str,
     transfer_uuid: &Uuid,
+    folder_uuid: &Uuid,
 ) -> Result<[u8; 128], Error> {
     let file_size = data;
 
@@ -511,13 +530,14 @@ fn send(
     buffer.extend_from_slice(&size);
     buffer.extend_from_slice(&[file_name.len() as u8]);
     buffer.extend_from_slice(&file_name);
+    buffer.extend_from_slice(&folder_uuid.to_bytes_le());
     //buffer.extend_from_slice(&msg);
 
     println!(
-        "{:?}, {:?}, {:?}",
-        buffer,
-        &transfer_uuid.to_bytes_le(),
-        &file_size
+        "folder uuid: {:?},
+        test uuid: {:?}",
+        folder_uuid,
+        Uuid::from_bytes(folder_uuid.to_bytes_le())
     );
 
     match stream.write_all(&buffer) {

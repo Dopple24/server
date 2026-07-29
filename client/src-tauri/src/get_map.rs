@@ -27,12 +27,11 @@ pub struct FilMap {
     path: PathBuf,
 }
 
-pub fn get_map(mut stream: TcpStream, username: &str, password: &str) -> Result<()> {
+pub fn get_map(mut stream: TcpStream, username: &str, password: &str) -> Result<FolderMap> {
     stream.write_all(&first_message(9, username, password))?;
     let map_bytes = recv_framed(&mut stream)?;
     let map: FolderMap = serde_json::from_slice(&map_bytes)?;
-    println!("map: {:#?}", map);
-    Ok(())
+    Ok(map)
 }
 
 /// Reads a length-prefixed message written by `send_framed`.
@@ -46,7 +45,7 @@ pub fn recv_framed(stream: &mut TcpStream) -> Result<Vec<u8>> {
     Ok(payload)
 }
 
-fn first_message(message_code: u8, username: &str, password: &str) -> [u8; CHUNK_SIZE] {
+pub fn first_message(message_code: u8, username: &str, password: &str) -> [u8; CHUNK_SIZE] {
     let username_bytes = username.as_bytes();
     let password_bytes = password.as_bytes();
 

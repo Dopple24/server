@@ -1,0 +1,74 @@
+<!doctype html>
+<html>
+    <head>
+        <title>My App</title>
+        <link rel="stylesheet" href="style.css" />
+    </head>
+    <body>
+
+    <section id="app-view">
+      <div class="controls">
+        <button id="run-btn">Run Task</button>
+        <button id="greet-btn">Greet</button>
+        <button id="refresh-btn">Refresh Map</button>
+        <button id="logout-btn">Log Out</button>
+        <button id="upload-btn">Upload</button>
+        <button id="test-btn">test</button>
+      </div>
+      <div id="map-view">
+        <div id="nav-bar">
+          <button id="up-btn">Up</button>
+          <div id="breadcrumb">
+            <span class="crumb-link">Home</span>
+            <span class="crumb-sep">/</span>
+            <span class="crumb-link">Projects</span>
+            <span class="crumb-sep">/</span>
+            <span class="crumb-current">Reports</span>
+          </div>
+        </div>
+        <div id="entry-list" class="entry-list"></div>
+      </div>
+      <pre id="output"></pre>
+    </section>
+
+    <section id="transfer-manager">
+      <div class="transfer-header">Transferring 2 files</div>
+      <div id="transfer-column">
+
+        <div class="transfer-row">
+          <div class="transfer-item">
+            <span class="file-name">
+              <svg class="file-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+                <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+                <path d="M14 2v6h6"/>
+              </svg>
+              project-report.pdf
+            </span>
+            <span class="file-percent">10%</span>
+          </div>
+          <div class="transfer-progress-track">
+            <div class="transfer-progress-bar" style="width: 10%;"></div>
+          </div>
+        </div>
+
+        <div class="transfer-row">
+          <div class="transfer-item">
+            <span class="file-name">
+              <svg class="file-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+                <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+                <path d="M14 2v6h6"/>
+              </svg>
+              holiday-photos.zip
+            </span>
+            <span class="file-percent">64%</span>
+          </div>
+          <div class="transfer-progress-track">
+            <div class="transfer-progress-bar" style="width: 64%;"></div>
+          </div>
+        </div>
+
+      </div>
+    </section>
+        <script src="app.js"></script>
+    </body>
+</html>
