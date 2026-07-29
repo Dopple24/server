@@ -15,7 +15,7 @@ use uuid::Uuid;
 
 use crate::{
     file_transfer::CHUNK_SIZE,
-    response::{Code, ErrorTransfer},
+    response::{self, Code, ErrorTransfer, TransferSuccess},
 };
 
 const DATABASE_LOCATION: &str = "./database.json";
@@ -294,4 +294,8 @@ pub fn login_api(buf: &[u8; CHUNK_SIZE]) -> Option<(Uuid, usize)> {
         Some(u) => Some((u, password_end)),
         None => None,
     }
+}
+
+pub fn attempt_login(mut stream: TcpStream) {
+    let _ = stream.write_all(&[TransferSuccess::Ok.get_code()]);
 }

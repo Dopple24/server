@@ -2,6 +2,7 @@ use chrono::{DateTime, Local, Utc};
 use serde::{Deserialize, Serialize};
 use std::{
     eprintln, fs, io,
+    iter::Map,
     path::{Path, PathBuf},
     sync::{Arc, RwLock, RwLockReadGuard},
 };
@@ -305,7 +306,14 @@ impl MapStore {
 
         persist(&guard)?;
         Ok(())
-        // write guard dropped here
+    }
+
+    pub fn get_path(&self, folder_uuid: Uuid) -> Result<PathBuf, MapError> {
+        let mut guard = self.inner.write().map_err(|_| MapError::Poisoned)?;
+        let folder = guard
+            .find_mut(folder_uuid)
+            .ok_or(MapError::FolderNotFound(folder_uuid))?;
+        Ok(folder.path.clone())
     }
 
     pub fn remove_file(&self, file_uuid: &Uuid, client_uuid: &Uuid) -> Result<(), ErrorTransfer> {

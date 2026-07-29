@@ -19,6 +19,7 @@ pub enum RequestType {
     Delete,
     GuestRequestFile,
     ShareLink,
+    LoginAttempt,
 }
 
 impl RequestType {
@@ -34,6 +35,7 @@ impl RequestType {
             6 => Self::ReinitGetFile,
             8 => Self::Register,
             9 => Self::GetMap,
+            34 => Self::LoginAttempt,
             100 => Self::ShareLink,
             200 => Self::GuestRequestFile,
             255 => Self::Delete,

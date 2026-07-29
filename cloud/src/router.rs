@@ -79,6 +79,9 @@ pub fn handle_client(
                     public_links,
                 );
             }
+            RequestType::LoginAttempt => {
+                auth::attempt_login(stream);
+            }
             _ => {
                 println!("shuting down");
                 let _ = stream.shutdown(std::net::Shutdown::Both);

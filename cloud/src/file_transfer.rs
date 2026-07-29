@@ -343,7 +343,7 @@ pub fn recieve(
 ) {
     let transfer = Arc::new(Mutex::new(Transfer::new(max_workers)));
 
-    let file = match init_transfer(&init_message[offset - 1..]) {
+    let file = match init_transfer(&init_message[offset - 1..], &map_store) {
         Ok(f) => Some(f),
         Err(e) => {
             eprintln!("init_transfer failed: {e:?}");
@@ -476,13 +476,33 @@ pub fn recieve(
     }
 }
 
-fn init_transfer(init_message: &[u8]) -> Result<TransferedFile, ErrorTransfer> {
+fn init_transfer(
+    init_message: &[u8],
+    map_store: &MapStore,
+) -> Result<TransferedFile, ErrorTransfer> {
     let mut uuid_bytes: [u8; 16] = [0; 16];
     for i in 0..=15 {
         uuid_bytes[i] = init_message[i + 1];
     }
+
     let name_len = init_message[24] as usize;
-    let file_name = String::from_utf8_lossy(&init_message[25..25 + name_len]).to_string();
+    let name_end = 25 + name_len;
+    let folder_uuid_start = name_end;
+    let folder_uuid_end = folder_uuid_start + 16;
+
+    let file_name = String::from_utf8_lossy(&init_message[25..name_end]).to_string();
+    let folder_uuid = Uuid::from_bytes_le(
+        init_message[folder_uuid_start..folder_uuid_end]
+            .try_into()
+            .unwrap(),
+    );
+    let path = match map_store.get_path(folder_uuid) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("failed to find path from folder_uuid: {folder_uuid:?}, e: {e:?}");
+            return Err(ErrorTransfer::NotFound);
+        }
+    };
 
     let temp_location = Path::new(TEMP_FOLDER_LOCATION);
     let stor_location = Path::new(STORAGE_FOLDER_LOCATION);
@@ -495,8 +515,19 @@ fn init_transfer(init_message: &[u8]) -> Result<TransferedFile, ErrorTransfer> {
         .map_err(|e| eprintln!("Failed to create required directory {temp_location:?}: {e}"))
         .expect("storage_location folder creation failed");
 
+    let file_name = match Path::new(&file_name)
+        .file_name()
+        .and_then(|name| name.to_str())
+    {
+        Some(f) => f,
+        None => {
+            eprintln!("failed to get file_name from path");
+            return Err(ErrorTransfer::InvalidFileName);
+        }
+    };
+
     let file_path = format!("{TEMP_FOLDER_LOCATION}/{}", file_name);
-    let storage_file_path = format!("{STORAGE_FOLDER_LOCATION}/{}", file_name);
+    let storage_file_path = path.join(&file_name);
     let config_file_path = format!("{}.config", file_path);
 
     let path = Path::new(&file_path);
@@ -506,6 +537,11 @@ fn init_transfer(init_message: &[u8]) -> Result<TransferedFile, ErrorTransfer> {
     if path.exists() || storage_path.exists() || config_path.exists() {
         return Err(ErrorTransfer::ThisFileExists);
     }
+
+    println!("path: {path:?}");
+    println!("path: {storage_path:?}");
+    println!("path: {config_path:?}");
+
     let file = match File::create(path) {
         Ok(val) => val,
         Err(y) => {

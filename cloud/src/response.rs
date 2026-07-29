@@ -46,6 +46,7 @@ pub enum ErrorTransfer {
     Locked,
     InvalidRequest,
     Closed,
+    InvalidFileName,
 }
 
 impl Code for ErrorTransfer {
@@ -55,6 +56,7 @@ impl Code for ErrorTransfer {
             Self::Overflow => 40,
             Self::ThisFileExists => 41,
             Self::InvalidRequest => 42,
+            Self::InvalidFileName => 43,
             Self::NotFound => 44,
             Self::NotInitialized => 45,
             Self::AlreadyInitialized => 46,
@@ -83,6 +85,7 @@ impl Code for ErrorTransfer {
             Self::InternalServerError => "50 internal server error".to_string(),
             Self::TooFast => "51 too fast".to_string(),
             Self::Locked => "53 requested file is locked".to_string(),
+            Self::InvalidFileName => "43 invalid file name".to_string(),
             Self::Closed => "10 closed".to_string(),
         };
         buffer.extend_from_slice(msg.as_bytes());
