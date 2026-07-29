@@ -20,11 +20,12 @@ use std::{
     thread,
     time::{self, UNIX_EPOCH},
 };
+use tauri::State;
 use uuid::Uuid;
 
+use crate::reinit::first_message;
 use crate::reinit::PartAcc;
 use crate::reinit::Parts;
-use crate::reinit::first_message;
 use crate::response::ErrorTransfer;
 use crate::response::TransferSuccess;
 use crate::response::{self, Code};
@@ -85,14 +86,24 @@ impl Transfer {
 pub fn request(
     mut stream: TcpStream,
     max_workers: usize,
-    parts: &Arc<RwLock<Parts>>,
+    parts: State<Arc<RwLock<Parts>>>,
     username: &str,
     password: &str,
-    file_uuid: &Uuid,
+    file_uuid: &str,
     path_for_the_requested_file: &str,
-    filename: &str,
 ) -> std::io::Result<()> {
-    stream.write_all(&first_message(5, file_uuid, username, password))?;
+    let path = Path::new(path_for_the_requested_file);
+    let filename = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
+
+    let file_uuid = match Uuid::from_str(file_uuid) {
+        Ok(u) => u,
+        Err(e) => {
+            eprintln!("failed to get uuid from str");
+            return Err(Error::last_os_error());
+        }
+    };
+
+    stream.write_all(&first_message(5, &file_uuid, username, password))?;
 
     let mut buf = [0u8; 100];
     stream.read(&mut buf)?;
@@ -103,11 +114,13 @@ pub fn request(
         20 => {
             let mut parts_write = parts.write().unwrap();
             parts_write.acc.push(PartAcc {
+                uuid: Uuid::new_v4(),
                 temp_path: temp_path.clone(),
                 real_path: path_for_the_requested_file.to_string(),
                 server_uuid: file_uuid.to_string(),
             });
-            parts_write.save();
+            let res = parts_write.save();
+            println!("parts_write: {res:?}");
         }
         48 => {
             eprintln!("forbidden");
@@ -149,23 +162,37 @@ pub fn request(
 
 pub fn reinitialize(
     mut stream: TcpStream,
-    parts: &Arc<RwLock<Parts>>,
+    parts: State<Arc<RwLock<Parts>>>,
     max_workers: usize,
+    acc_uuid: &str,
     username: &str,
     password: &str,
 ) -> Result<(), Error> {
+    println!("{acc_uuid:?}");
     let (real_path, temp_path, file_uuid) = {
+        let uuid = match Uuid::from_str(acc_uuid) {
+            Ok(u) => u,
+            Err(e) => {
+                eprintln!("invalid uuid: {e:?}");
+                return Err(Error::last_os_error());
+            }
+        };
+        println!("{uuid:?}");
         let parts_read = parts.read().unwrap();
         if parts_read.acc.is_empty() {
             eprintln!("acc in parts.json is empty, therefor there is nothing to reinit");
             return Err(Error::last_os_error());
         }
-        match Uuid::from_str(&parts_read.acc[0].server_uuid) {
-            Ok(u) => (
-                parts_read.acc[0].real_path.clone(),
-                parts_read.acc[0].temp_path.clone(),
-                u,
-            ),
+        let part = match parts_read.acc.iter().find(|p| p.uuid == uuid) {
+            Some(p) => p,
+            None => {
+                eprintln!("uuid not found");
+                return Err(Error::last_os_error());
+            }
+        };
+
+        match Uuid::from_str(&part.server_uuid) {
+            Ok(u) => (part.real_path.clone(), part.temp_path.clone(), u),
             Err(e) => {
                 eprintln!("failed parsing string into uuid: {:?}", e);
                 return Err(Error::last_os_error());

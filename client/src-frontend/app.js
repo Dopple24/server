@@ -89,6 +89,42 @@ async function upload() {
     }
 }
 
+async function download(uuid) {
+    const transferId = crypto.randomUUID();
+    addTransferRow(transferId);
+    runDownload(transferId, uuid, false);
+}
+
+async function runDownload(transferId, uuid, isRetry) {
+    try {
+        if (isRetry) {
+            await invoke("download_reinit", { username, password, accUuid: uuid });
+        } else {
+            await invoke("download", { username, password, fileUuid: uuid });
+        }
+        setTransferSuccess(transferId);
+    } catch (err) {
+        const message = err?.toString?.() ?? String(err);
+        setTransferError(transferId, message, () => runDownload(transferId, uuid, true));
+    }
+}
+
+async function download_reinit(uuid) {
+    const transferId = crypto.randomUUID();
+    addTransferRow(transferId);
+
+    try {
+        // if your Rust command reports progress via events, listen and call:
+        // updateTransferProgress(transferId, percent);
+        await invoke("download_reinit", { username, password, accUuid: uuid });
+        updateTransferProgress(transferId, 100);
+    } catch (err) {
+        showError(err);
+    } finally {
+        removeTransferRow(transferId);
+    }
+}
+
 async function test() {
   try {
     await invoke("test_dialog");
@@ -160,8 +196,13 @@ function buildFileRow(file) {
   delete_btn.className = "delete-btn";
   delete_btn.textContent = `Delete`;
   delete_btn.addEventListener("click", () => deleteFile(file.uuid))
-
   row.appendChild(delete_btn);
+
+  const download_btn = document.createElement("button");
+  download_btn.className = "delete-btn";
+  download_btn.textContent = `Download`;
+  download_btn.addEventListener("click", () => download(file.uuid))
+  row.appendChild(download_btn);
 
     return row;
 }
@@ -236,7 +277,7 @@ function updateTransferHeader() {
     transferManager.style.display = count === 0 ? "none" : "";
 }
 
-function addTransferRow(id) {
+function addTransferRow(id, filename) {
     const row = document.createElement("div");
     row.className = "transfer-row";
     row.dataset.transferId = id;
@@ -251,7 +292,7 @@ function addTransferRow(id) {
             <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
             <path d="M14 2v6h6"/>
         </svg>
-        ${id}
+        ${filename ?? id}
     `;
     item.appendChild(nameSpan);
 
@@ -298,6 +339,77 @@ function removeTransferRow(id) {
     updateTransferHeader();
 }
 
+function setTransferError(id, message, onRetry) {
+    const row = transferColumn.querySelector(`.transfer-row[data-transfer-id="${id}"]`);
+    if (!row) return;
+
+    row.classList.add("transfer-error");
+    row.querySelector(".file-percent").textContent = "Failed";
+
+    let errorLine = row.querySelector(".transfer-error-msg");
+    if (!errorLine) {
+        errorLine = document.createElement("div");
+        errorLine.className = "transfer-error-msg";
+        row.appendChild(errorLine);
+    }
+    errorLine.textContent = message;
+
+    let retryBtn = row.querySelector(".retry-btn");
+    if (!retryBtn) {
+        retryBtn = document.createElement("button");
+        retryBtn.className = "retry-btn";
+        retryBtn.textContent = "Retry";
+        row.appendChild(retryBtn);
+    }
+    retryBtn.onclick = () => {
+        row.classList.remove("transfer-error");
+        errorLine.remove();
+        retryBtn.remove();
+        row.querySelector(".file-percent").textContent = "0%";
+        onRetry();
+    };
+}
+
+function setTransferSuccess(id) {
+    const row = transferColumn.querySelector(`.transfer-row[data-transfer-id="${id}"]`);
+    if (!row) return;
+    updateTransferProgress(id, 100);
+    row.classList.add("transfer-success");
+    setTimeout(() => removeTransferRow(id), 1000);
+}
+
+async function loadPendingTransfers() {
+    try {
+      const parts = await invoke("request_parts");
+      console.log(parts);
+
+        parts.acc.forEach((entry) => {
+            const transferId = crypto.randomUUID();
+            const filename = entry.real_path.split("/").pop();
+            addTransferRow(transferId, filename);
+            setTransferError(
+                transferId,
+                "Incomplete — resume to continue",
+                () => runDownload(transferId, entry.uuid, true)
+            );
+        });
+
+        parts.send.forEach((entry) => {
+            const transferId = crypto.randomUUID();
+            const filename = entry.real_path.split("/").pop();
+            addTransferRow(transferId, filename);
+            setTransferError(
+                transferId,
+                "Incomplete — resume to continue",
+                () => runUpload(transferId, entry.server_uuid, true) // once upload_reinit exists
+            );
+        });
+    } catch (err) {
+        showError(err);
+    }
+}
+
 
 // Run automatically as soon as the page loads.
 fetchMap();
+loadPendingTransfers();

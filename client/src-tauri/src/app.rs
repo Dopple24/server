@@ -76,7 +76,7 @@ fn main() -> std::io::Result<()> {
             &args[3],
         ),*/
         "--reinit" => reinit(TcpStream::connect(SOCKET)?, &parts, &args[2], &args[3]),
-        "--get" => {
+        /*"--get" => {
             if args.len() < 5 {
                 println!(
                     "Please enter an arg with uuid e.g. --get username password **valid uuid**"
@@ -89,18 +89,19 @@ fn main() -> std::io::Result<()> {
                 &parts,
                 &args[2],
                 &args[3],
-                &Uuid::from_str(&args[4]).expect("provide a valid uuid"),
+                &args[4],
                 "./storage/test.txt",
-                "test.txt",
             )
-        }
+        }*/
+        /*
         "--get_reinit" => {
             request_file::reinitialize(TcpStream::connect(SOCKET)?, &parts, 10, &args[2], &args[3])
-        }
+        }*/
+        /*
         "--get_map" => {
             get_map::get_map(TcpStream::connect(SOCKET)?, &args[2], &args[3]);
             Ok(())
-        }
+        }*/
         "--register" => {
             if args.len() < 5 {
                 println!(
@@ -116,9 +117,9 @@ fn main() -> std::io::Result<()> {
                 }
             }
         }
-        "--delete" => {
+        /*"--delete" => {
             delete_file::delete(TcpStream::connect(SOCKET)?, &args[2], &args[3], &args[4])
-        }
+        }*/
         "--share_link" => {
             share_link::share_link(TcpStream::connect(SOCKET)?, &args[2], &args[3], &args[4], {
                 if args.len() > 5 {

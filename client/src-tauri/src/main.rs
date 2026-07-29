@@ -39,6 +39,14 @@ fn request_map(username: &str, password: &str) -> Result<get_map::FolderMap, Str
 }
 
 #[tauri::command]
+fn request_parts(parts: State<'_, Arc<RwLock<Parts>>>) -> Result<Parts, String> {
+    parts
+        .read()
+        .map(|guard| guard.clone())
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 fn try_login(username: &str, password: &str) -> Result<bool, String> {
     let stream = TcpStream::connect(SOCKET).map_err(|e| e.to_string())?;
     Ok(login_attempt(stream, username, password))
@@ -95,6 +103,47 @@ async fn upload(
     }
 }
 
+#[tauri::command]
+async fn download(
+    username: String,
+    password: String,
+    file_uuid: String,
+    parts: State<'_, Arc<RwLock<Parts>>>,
+    app: tauri::AppHandle,
+) -> Result<(), String> {
+    let (tx, rx) = mpsc::channel();
+    app.dialog().file().save_file(move |file_path| {
+        let _ = tx.send(file_path.map(|p| p.to_string()));
+    });
+    let path = tauri::async_runtime::spawn_blocking(move || rx.recv())
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())?
+        .ok_or("no destination selected".to_string())?;
+    println!("download called");
+    let stream = TcpStream::connect(SOCKET).map_err(|e| e.to_string())?;
+    println!("connected");
+    match request_file::request(stream, 10, parts, &username, &password, &file_uuid, &path) {
+        Ok(a) => Ok(a),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+#[tauri::command]
+async fn download_reinit(
+    username: String,
+    password: String,
+    acc_uuid: String,
+    parts: State<'_, Arc<RwLock<Parts>>>,
+) -> Result<(), String> {
+    let stream = TcpStream::connect(SOCKET).map_err(|e| e.to_string())?;
+    println!("connected");
+    match request_file::reinitialize(stream, parts, 10, &acc_uuid, &username, &password) {
+        Ok(a) => Ok(a),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
 fn main() {
     let parts = get_parts_rw_lock();
     tauri::Builder::default()
@@ -106,7 +155,10 @@ fn main() {
             try_login,
             upload,
             test_dialog,
-            delete_file
+            delete_file,
+            download,
+            download_reinit,
+            request_parts,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

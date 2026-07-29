@@ -17,11 +17,12 @@ use crate::app::{
     hash_file, send_chunk, CHUNK_SIZE, MAX_THREADS, NEW_PARTS_PATH, OVERHEAD, PARTS_PATH,
 };
 
+#[derive(Deserialize, Serialize, Debug)]
 pub enum PartsError {
     FailedToSave,
 }
 
-#[derive(Deserialize, Serialize, Debug)]
+#[derive(Deserialize, Serialize, Debug, Clone)]
 pub struct Parts {
     pub send: Vec<PartSend>,
     pub acc: Vec<PartAcc>,
@@ -33,8 +34,9 @@ pub struct PartSend {
     pub filename: String,
 }
 
-#[derive(Deserialize, Serialize, Debug)]
+#[derive(Deserialize, Serialize, Debug, Clone)]
 pub struct PartAcc {
+    pub uuid: Uuid,
     pub temp_path: String,
     pub real_path: String,
     pub server_uuid: String,
