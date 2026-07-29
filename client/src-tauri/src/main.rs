@@ -45,6 +45,15 @@ fn try_login(username: &str, password: &str) -> Result<bool, String> {
 }
 
 #[tauri::command]
+fn delete_file(username: &str, password: &str, uuid: &str) -> Result<(), String> {
+    let stream = TcpStream::connect(SOCKET).map_err(|e| e.to_string())?;
+    match delete_file::delete(stream, username, password, uuid) {
+        Ok(a) => Ok(a),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+#[tauri::command]
 async fn test_dialog(app: tauri::AppHandle) {
     println!("test_dialog called");
     let (tx, rx) = mpsc::channel();
@@ -53,7 +62,7 @@ async fn test_dialog(app: tauri::AppHandle) {
         let _ = tx.send(());
     });
     println!("pick_file() call returned");
-    let _ = rx.recv(); // <-- add this
+    let _ = rx.recv();
     println!("recv returned");
 }
 
@@ -70,8 +79,6 @@ async fn upload(
         let _ = tx.send(file_path.map(|p| p.to_string()));
     });
 
-    // Move the blocking recv() onto a real blocking-pool thread,
-    // so it doesn't block the async task driving the command.
     let path = tauri::async_runtime::spawn_blocking(move || rx.recv())
         .await
         .map_err(|e| e.to_string())?
@@ -99,6 +106,7 @@ fn main() {
             try_login,
             upload,
             test_dialog,
+            delete_file
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

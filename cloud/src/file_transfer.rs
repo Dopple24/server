@@ -35,6 +35,7 @@ const STORAGE_FOLDER_LOCATION: &str = "./storage";
 struct ConfigFile {
     last_changed_at: u64,
     uuid: Uuid,
+    parent_folder_uuid: Uuid,
     file_size_chunks: usize,
     transfered_chunks: HashSet<usize>,
     owner: Vec<Uuid>,
@@ -45,6 +46,7 @@ struct ConfigFile {
 struct TransferedFile {
     uuid: Uuid,
     file_size_chunks: usize,
+    parent_folder_uuid: Uuid,
     storage_path: PathBuf,
     temp_path: PathBuf,
     config_path: Mutex<PathBuf>,
@@ -162,6 +164,7 @@ pub fn reinitialize(
         file_size_chunks: config_file.file_size_chunks,
         file: Arc::new(file),
         temp_path: temp_at.to_path_buf(),
+        parent_folder_uuid: config_file.parent_folder_uuid,
         storage_path: temp_to_storage(temp_at.as_path()).expect("{temp_at:?} not in ./temp"),
         config_path: Mutex::new(existing_path.to_path_buf()),
         uuid,
@@ -436,7 +439,7 @@ pub fn recieve(
         Vec::new(),
     );
 
-    match map_store.add_file(None, mapped_file) {
+    match map_store.add_file(Some(lock_file.parent_folder_uuid), mapped_file) {
         Ok(_) => (),
         Err(e) => {
             eprintln!("map store couldn't add a file: {e:?}");
@@ -496,6 +499,7 @@ fn init_transfer(
             .try_into()
             .unwrap(),
     );
+
     let path = match map_store.get_path(folder_uuid) {
         Ok(p) => p,
         Err(e) => {
@@ -557,6 +561,7 @@ fn init_transfer(
                 return Err(err);
             }
         },
+        parent_folder_uuid: folder_uuid,
         file: Arc::new(file),
         temp_path: path.to_path_buf(),
         storage_path: storage_path.to_path_buf(),
@@ -582,6 +587,7 @@ fn setup_config(lock_file: &Arc<TransferedFile>) -> Result<(), Error> {
             .as_nanos() as u64,
         uuid: lock_file.uuid,
         file_size_chunks: lock_file.file_size_chunks,
+        parent_folder_uuid: lock_file.parent_folder_uuid,
         transfered_chunks: HashSet::new(),
         is_public: false,  //is_public is todo!()
         owner: Vec::new(), //owner is todo!()

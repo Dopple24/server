@@ -7,6 +7,10 @@ const upBtn = document.getElementById("up-btn");
 const uploadBtn = document.getElementById("upload-btn");
 const testBtn = document.getElementById("test-btn");
 
+const transferManager = document.getElementById("transfer-manager");
+const transferColumn = document.getElementById("transfer-column");
+const transferHeader = transferManager.querySelector(".transfer-header");
+
 const username = sessionStorage.getItem("username");
 const password = sessionStorage.getItem("password");
 
@@ -69,13 +73,20 @@ function goUp() {
 }
 
 async function upload() {
-  try {
-    await invoke("upload", { username, password, folderUuid: currentFolderUuid() });
-    fetchMap();
-  }
-  catch (err) {
-      showError(err);
-  }
+    const transferId = crypto.randomUUID();
+    addTransferRow(transferId);
+
+    try {
+        // if your Rust command reports progress via events, listen and call:
+        // updateTransferProgress(transferId, percent);
+        await invoke("upload", { username, password, folderUuid: currentFolderUuid() });
+        updateTransferProgress(transferId, 100);
+    } catch (err) {
+        showError(err);
+    } finally {
+        removeTransferRow(transferId);
+        fetchMap();
+    }
 }
 
 async function test() {
@@ -143,7 +154,14 @@ function buildFileRow(file) {
     const meta = document.createElement("div");
     meta.className = "entry-meta";
     meta.textContent = `Updated ${formatDate(file.last_changed_at)}`;
-    row.appendChild(meta);
+  row.appendChild(meta);
+
+  const delete_btn = document.createElement("button");
+  delete_btn.className = "delete-btn";
+  delete_btn.textContent = `Delete`;
+  delete_btn.addEventListener("click", () => deleteFile(file.uuid))
+
+  row.appendChild(delete_btn);
 
     return row;
 }
@@ -211,6 +229,75 @@ document.getElementById("greet-btn").addEventListener("click", async () => {
         showError(err);
     }
 });
+
+function updateTransferHeader() {
+    const count = transferColumn.children.length;
+    transferHeader.textContent = `Transferring ${count} file${count === 1 ? "" : "s"}`;
+    transferManager.style.display = count === 0 ? "none" : "";
+}
+
+function addTransferRow(id) {
+    const row = document.createElement("div");
+    row.className = "transfer-row";
+    row.dataset.transferId = id;
+
+    const item = document.createElement("div");
+    item.className = "transfer-item";
+
+    const nameSpan = document.createElement("span");
+    nameSpan.className = "file-name";
+    nameSpan.innerHTML = `
+        <svg class="file-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+            <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+            <path d="M14 2v6h6"/>
+        </svg>
+        ${id}
+    `;
+    item.appendChild(nameSpan);
+
+    const percentSpan = document.createElement("span");
+    percentSpan.className = "file-percent";
+    percentSpan.textContent = "0%";
+    item.appendChild(percentSpan);
+
+    row.appendChild(item);
+
+    const track = document.createElement("div");
+    track.className = "transfer-progress-track";
+    const bar = document.createElement("div");
+    bar.className = "transfer-progress-bar";
+    bar.style.width = "0%";
+    track.appendChild(bar);
+    row.appendChild(track);
+
+    transferColumn.appendChild(row);
+    updateTransferHeader();
+    return row;
+}
+
+async function deleteFile(uuid) {
+  try {
+    await invoke("delete_file", { username, password, uuid });
+    fetchMap();
+  }
+  catch (err) {
+    showError(err)
+  }
+}
+
+function updateTransferProgress(id, percent) {
+    const row = transferColumn.querySelector(`.transfer-row[data-transfer-id="${id}"]`);
+    if (!row) return;
+    row.querySelector(".file-percent").textContent = `${percent}%`;
+    row.querySelector(".transfer-progress-bar").style.width = `${percent}%`;
+}
+
+function removeTransferRow(id) {
+    const row = transferColumn.querySelector(`.transfer-row[data-transfer-id="${id}"]`);
+    if (row) row.remove();
+    updateTransferHeader();
+}
+
 
 // Run automatically as soon as the page loads.
 fetchMap();
