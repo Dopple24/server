@@ -2,6 +2,10 @@ const { invoke } = window.__TAURI__.core;
 
 const loginError = document.getElementById("login-error");
 
+document.getElementById("go-to-register").addEventListener("click", () => {
+    window.location.href = "register.html";
+});
+
 document.getElementById("login-btn").addEventListener("click", async () => {
     const username = document.getElementById("login-username").value;
     const password = document.getElementById("login-password").value;

@@ -2,6 +2,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use std::{
+    env::args,
     net::TcpStream,
     path::Path,
     sync::{Arc, RwLock},
@@ -12,7 +13,7 @@ use std::sync::mpsc;
 use tauri_plugin_dialog::DialogExt;
 
 use crate::{
-    app::{get_parts_rw_lock, sending, SOCKET},
+    app::{get_parts_rw_lock, sending, serve_public, SOCKET},
     login_attempt::login_attempt,
     reinit::{reinit, Parts},
 };
@@ -58,6 +59,20 @@ fn try_login(username: &str, password: &str) -> Result<bool, String> {
 fn delete_file(username: &str, password: &str, uuid: &str) -> Result<(), String> {
     let stream = TcpStream::connect(SOCKET).map_err(|e| e.to_string())?;
     match delete_file::delete(stream, username, password, uuid) {
+        Ok(a) => Ok(a),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+#[tauri::command]
+fn share_file(
+    username: &str,
+    password: &str,
+    uuid: &str,
+    hours_after: u64,
+) -> Result<String, String> {
+    let stream = TcpStream::connect(SOCKET).map_err(|e| e.to_string())?;
+    match share_link::share_link(stream, username, password, uuid, hours_after) {
         Ok(a) => Ok(a),
         Err(e) => Err(e.to_string()),
     }
@@ -193,7 +208,22 @@ async fn download_reinit(
     }
 }
 
+#[tauri::command]
+async fn register(username: String, password: String, admin_pass: String) -> Result<(), String> {
+    let stream = TcpStream::connect(SOCKET).map_err(|e| e.to_string())?;
+    println!("connected");
+    match auth::register(stream, &username, &password, &admin_pass) {
+        Ok(a) => Ok(a),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
 fn main() {
+    let args: Vec<String> = args().collect();
+    if args.get(1).map(|a| a == "--serve_public").unwrap_or(false) {
+        serve_public();
+    }
+
     let parts = get_parts_rw_lock();
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
@@ -202,6 +232,7 @@ fn main() {
             greet,
             request_map,
             try_login,
+            register,
             upload,
             upload_reinit,
             test_dialog,
@@ -210,7 +241,8 @@ fn main() {
             download,
             download_reinit,
             request_parts,
-            create_folder
+            create_folder,
+            share_file,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

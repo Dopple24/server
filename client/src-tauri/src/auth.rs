@@ -1,4 +1,5 @@
 use std::{
+    fmt,
     io::{Read, Write},
     net::TcpStream,
 };
@@ -15,6 +16,23 @@ pub enum DatabaseError {
     Forbidden,
     Unknown,
 }
+
+impl fmt::Display for DatabaseError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let msg = match self {
+            DatabaseError::UsernameOccupied => "username is already taken",
+            DatabaseError::HashingFailed => "failed to hash password",
+            DatabaseError::FailedToSave => "failed to save to database",
+            DatabaseError::FailedToLoad => "failed to load from database",
+            DatabaseError::MalformedMessage => "malformed message",
+            DatabaseError::Forbidden => "forbidden",
+            DatabaseError::Unknown => "unknown error",
+        };
+        write!(f, "{msg}")
+    }
+}
+
+impl std::error::Error for DatabaseError {}
 
 pub fn register(
     mut stream: TcpStream,

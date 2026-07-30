@@ -221,19 +221,34 @@ function buildFileRow(file) {
     const meta = document.createElement("div");
     meta.className = "entry-meta";
     meta.textContent = `Updated ${formatDate(file.last_changed_at)}`;
-  row.appendChild(meta);
+    row.appendChild(meta);
 
-  const delete_btn = document.createElement("button");
-  delete_btn.className = "delete-btn";
-  delete_btn.textContent = `Delete`;
-  delete_btn.addEventListener("click", () => deleteFile(file.uuid))
-  row.appendChild(delete_btn);
+    const delete_btn = document.createElement("button");
+    delete_btn.className = "delete-btn";
+    delete_btn.textContent = "Delete";
+    delete_btn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        deleteFile(file.uuid);
+    });
+    row.appendChild(delete_btn);
 
-  const download_btn = document.createElement("button");
-  download_btn.className = "delete-btn";
-  download_btn.textContent = `Download`;
-  download_btn.addEventListener("click", () => download(file.uuid))
-  row.appendChild(download_btn);
+    const download_btn = document.createElement("button");
+    download_btn.className = "delete-btn";
+    download_btn.textContent = "Download";
+    download_btn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        download(file.uuid);
+    });
+    row.appendChild(download_btn);
+
+    const share_btn = document.createElement("button");
+    share_btn.className = "delete-btn";
+    share_btn.textContent = "Share";
+    share_btn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        startShareRow(row, file);
+    });
+    row.appendChild(share_btn);
 
     return row;
 }
@@ -257,6 +272,129 @@ function render() {
     if (hasFiles) {
         folder.files.forEach((f) => entryList.appendChild(buildFileRow(f)));
     }
+}
+
+function startShareRow(row, file) {
+    if (row.querySelector(".share-inline")) return; // already open
+
+    const wrap = document.createElement("div");
+    wrap.className = "share-inline";
+
+    const input = document.createElement("input");
+    input.type = "number";
+    input.min = "1";
+    input.placeholder = "Hours available";
+    input.className = "share-hours-input";
+    wrap.appendChild(input);
+
+    const resultLine = document.createElement("div");
+    resultLine.className = "share-result";
+    wrap.appendChild(resultLine);
+
+    row.appendChild(wrap);
+    input.focus();
+
+    let isSubmitting = false;
+
+    function cancel() {
+        wrap.remove();
+    }
+
+    async function confirm() {
+        if (isSubmitting) return;
+
+        const hours = parseInt(input.value, 10);
+        if (!hours || hours <= 0) {
+            cancel();
+            return;
+        }
+
+        isSubmitting = true;
+        input.disabled = true;
+        resultLine.textContent = "";
+
+        try {
+            const link = await invoke("share_file", {
+                username,
+                password,
+                uuid: file.uuid,
+                hoursAfter: hours,
+            });
+            wrap.remove();
+            showModal("Share Link", link);
+        } catch (err) {
+            resultLine.textContent = err?.toString?.() ?? String(err);
+            input.disabled = false;
+            isSubmitting = false;
+        }
+    }
+
+    input.addEventListener("click", (e) => e.stopPropagation());
+    input.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") {
+            confirm();
+        } else if (e.key === "Escape") {
+            cancel();
+        }
+    });
+    input.addEventListener("blur", () => {
+        if (!isSubmitting) confirm();
+    });
+}
+
+function showModal(title, mes) {
+  let message = `127.0.0.1:8000/?token=${mes}`;
+    const overlay = document.createElement("div");
+    overlay.className = "modal-overlay";
+
+    const box = document.createElement("div");
+    box.className = "modal-box";
+
+    const heading = document.createElement("h3");
+    heading.textContent = title;
+    box.appendChild(heading);
+
+    const text = document.createElement("div");
+    text.className = "modal-message";
+    text.textContent = message;
+    box.appendChild(text);
+
+    const actions = document.createElement("div");
+    actions.className = "modal-actions";
+
+    const copyBtn = document.createElement("button");
+    copyBtn.textContent = "Copy";
+    copyBtn.addEventListener("click", async () => {
+        try {
+            await navigator.clipboard.writeText(message);
+            copyBtn.textContent = "Copied!";
+            setTimeout(() => (copyBtn.textContent = "Copy"), 1200);
+        } catch {
+            copyBtn.textContent = "Copy failed";
+        }
+    });
+    actions.appendChild(copyBtn);
+
+    const closeBtn = document.createElement("button");
+    closeBtn.textContent = "Close";
+    closeBtn.addEventListener("click", () => overlay.remove());
+    actions.appendChild(closeBtn);
+
+    box.appendChild(actions);
+    overlay.appendChild(box);
+
+    overlay.addEventListener("click", (e) => {
+        if (e.target === overlay) overlay.remove();
+    });
+
+    document.addEventListener("keydown", function onEsc(e) {
+        if (e.key === "Escape") {
+            overlay.remove();
+            document.removeEventListener("keydown", onEsc);
+        }
+    });
+
+    document.body.appendChild(overlay);
 }
 
 async function fetchMap() {

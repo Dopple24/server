@@ -4,6 +4,7 @@ use std::{
     thread,
 };
 
+use blake3::CHUNK_LEN;
 use uuid::Uuid;
 
 use crate::app::{CHUNK_SIZE, SOCKET};
@@ -11,11 +12,6 @@ use crate::app::{CHUNK_SIZE, SOCKET};
 use tiny_http::{Header, Request, Response, StatusCode};
 
 fn request_to_writer<W: Write>(mut stream: TcpStream, uuid: &Uuid, mut out: W) -> Result<()> {
-    let mut first_msg = [0u8; CHUNK_SIZE];
-    first_msg[0] = 200;
-    first_msg[1..17].copy_from_slice(uuid.as_bytes());
-    stream.write_all(&first_msg)?;
-
     let mut meta = [0u8; 5];
     stream
         .read_exact(&mut meta)
@@ -60,17 +56,30 @@ fn request_to_writer<W: Write>(mut stream: TcpStream, uuid: &Uuid, mut out: W) -
 }
 
 pub fn handle_download(req: Request, uuid: &Uuid) {
+    let mut stream = TcpStream::connect(SOCKET).expect("failed to connect to storage server");
+
+    let mut first_msg = [0u8; CHUNK_SIZE];
+    first_msg[0] = 200;
+    first_msg[1..17].copy_from_slice(uuid.as_bytes());
+    stream
+        .write_all(&first_msg)
+        .expect("error during file transfer");
+
+    let mut buf = [0u8; CHUNK_SIZE];
+    stream.read(&mut buf);
+
+    let filename_len = u16::from_be_bytes(buf[0..2].try_into().unwrap());
+    let filename =
+        String::from_utf8(buf[2..2 + filename_len as usize].to_vec()).unwrap_or("file".to_string());
+
+    stream.write_all(&[20u8; 1]);
+
     let (reader, writer) = std::io::pipe().expect("failed to create pipe");
-    let filename = format!("attachment; filename=\"{}\"", uuid);
+    let filename = format!("attachment; filename=\"{}\"", filename);
     let uuid = uuid.clone();
 
     thread::spawn(move || {
-        request_to_writer(
-            TcpStream::connect(SOCKET).expect("failed to connect to storage server"),
-            &uuid,
-            writer,
-        )
-        .expect("error during file transfer");
+        request_to_writer(stream, &uuid, writer).expect("error during file transfer");
     });
 
     let headers = vec![

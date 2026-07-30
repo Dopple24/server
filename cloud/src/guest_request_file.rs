@@ -26,19 +26,21 @@ pub fn guest_request_file(
     public_links: &Arc<RwLock<LinkDatabase>>,
     map_store: MapStore,
 ) {
-    let file_uuid = match {
-        let mut links_write = public_links.write().unwrap_or_else(|e| {
+    let link = match {
+        let links_write = public_links.write().unwrap_or_else(|e| {
             eprintln!("public_links was poisoned");
             e.into_inner()
         });
-        links_write.get_file_uuid(&Uuid::from_bytes(first_message[1..17].try_into().unwrap()))
+        links_write.get_link_from_token(&Uuid::from_bytes(first_message[1..17].try_into().unwrap()))
     } {
-        Some(u) => u,
-        None => {
+        Ok(u) => u,
+        Err(_) => {
             let _ = stream.write_all(&[ErrorTransfer::InvalidRequest.get_code()]);
             return;
         }
     };
+    let file_uuid = link.file_uuid;
+    let file_name = link.file_name;
     let path = match get_path(&file_uuid, &map_store) {
         Ok(p) => p,
         Err(e) => {
@@ -66,6 +68,57 @@ pub fn guest_request_file(
             return;
         }
     };
+
+    let name_bytes = file_name.as_bytes();
+
+    let len: u16 = match u16::try_from(name_bytes.len()) {
+        Ok(l) => l,
+        Err(e) => {
+            eprintln!("invalid length: {e:?}");
+            let _ = stream.write_all(&[ErrorTransfer::InvalidLength.get_code()]);
+            return;
+        }
+    };
+
+    let mut payload = Vec::with_capacity(2 + name_bytes.len());
+    payload.extend_from_slice(&len.to_be_bytes());
+    payload.extend_from_slice(name_bytes);
+
+    match stream.write_all(&payload) {
+        Ok(_) => (),
+        Err(e) if is_connection_broken(&e) => {
+            println!("connection broken");
+            return;
+        }
+        Err(e) => {
+            eprintln!("unexpected read error waiting for ready signal: {e}");
+            let _ = stream.write_all(&[ErrorTransfer::InternalServerError.get_code()]);
+            return;
+        }
+    };
+
+    let mut ready_buf = [0u8; 1];
+
+    match stream.read_exact(&mut ready_buf) {
+        Ok(_) => (),
+        Err(e) if is_connection_broken(&e) => {
+            println!("connection broken");
+            return;
+        }
+        Err(e) => {
+            eprintln!("unexpected read error waiting for ready signal: {e}");
+            let _ = stream.write_all(&[ErrorTransfer::InternalServerError.get_code()]);
+            return;
+        }
+    };
+
+    match ready_buf[0] {
+        20 => (),
+        _ => {
+            println!("connection broken");
+            return;
+        }
+    }
 
     let mut buf = [0u8; 5];
     buf[0] = 20;

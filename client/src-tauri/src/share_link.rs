@@ -15,8 +15,8 @@ pub fn share_link(
     username: &str,
     pass: &str,
     uuid: &str,
-    hours_after: &str,
-) -> Result<(), std::io::Error> {
+    hours_after: u64,
+) -> Result<String, std::io::Error> {
     let file_uuid = match Uuid::from_str(uuid) {
         Ok(uuid) => uuid,
         Err(e) => {
@@ -25,17 +25,10 @@ pub fn share_link(
         }
     };
 
-    let hours: u64 = match u64::from_str(hours_after) {
-        Ok(h) => h,
-        Err(_) => 1,
-    };
-
-    let timestamp = (SystemTime::now() + Duration::from_hours(hours))
+    let timestamp = (SystemTime::now() + Duration::from_hours(hours_after))
         .duration_since(UNIX_EPOCH)
         .expect("time went backwards")
         .as_secs() as i64;
-
-    println!("timestamp: {hours:?}");
 
     stream.write_all(&first_message(100, &file_uuid, username, pass, timestamp));
     let mut buf = [0u8; 17];
@@ -43,13 +36,10 @@ pub fn share_link(
 
     if buf[0] == 20 {
         let uuid = Uuid::from_bytes(buf[1..].try_into().unwrap());
-        println!(
-            "uuid of the share link is: {:?}\nit now can be found at: 127.0.0.1:8080/dl/{:?}",
-            uuid, uuid
-        )
+        return Ok(format!("{:?}", uuid));
     }
     println!("share_link ended with code: {}", buf[0]);
-    Ok(())
+    Err(Error::last_os_error())
 }
 
 pub fn first_message(

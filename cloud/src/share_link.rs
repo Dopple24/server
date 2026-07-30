@@ -20,16 +20,18 @@ use crate::{
     response::{Code, ErrorTransfer, TransferSuccess},
 };
 
-#[derive(Deserialize, Serialize, Debug)]
+#[derive(Deserialize, Serialize, Clone, Debug)]
 pub struct PublicLink {
-    file_uuid: Uuid,
-    valid_until: i64,
-    token: Uuid,
+    pub file_name: String,
+    pub file_uuid: Uuid,
+    pub valid_until: i64,
+    pub token: Uuid,
 }
 
 impl PublicLink {
-    pub fn new(file_uuid: Uuid, valid_until: i64, token: Uuid) -> PublicLink {
+    pub fn new(file_uuid: Uuid, valid_until: i64, token: Uuid, file_name: String) -> PublicLink {
         PublicLink {
+            file_name,
             file_uuid,
             valid_until,
             token,
@@ -60,6 +62,21 @@ impl LinkDatabase {
             }
         }
     }
+    pub fn get_filename(&self, uuid: &Uuid) -> Result<String, String> {
+        match self.links.iter().find(|l| &l.token == uuid) {
+            Some(l) => Ok(l.file_name.clone()),
+            None => Err("no token".to_string()),
+        }
+    }
+    #[allow(dead_code)]
+    pub fn get_link_from_token(&self, token: &Uuid) -> Result<PublicLink, String> {
+        self.links
+            .iter()
+            .find(|l| &l.token == token)
+            .cloned()
+            .ok_or_else(|| "no token".to_string())
+    }
+
     pub fn save(&self) -> Result<(), std::io::Error> {
         let contents = serde_json::to_string_pretty(self)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
@@ -111,7 +128,7 @@ pub fn share_link(
             return;
         }
     };
-    match map_read.find_file_clone(&file_uuid, client_uuid) {
+    let fil = match map_read.find_file_clone(&file_uuid, client_uuid) {
         Ok(f) => f,
         Err(e) => {
             println!("share link failed: {:?}", e);
@@ -137,7 +154,7 @@ pub fn share_link(
         pl.into_inner()
     });
 
-    match links_write.add(PublicLink::new(file_uuid, valid_until, token)) {
+    match links_write.add(PublicLink::new(file_uuid, valid_until, token, fil.name)) {
         Ok(_) => (),
         Err(e) => {
             eprintln!("failed to add link to links: {e:?}");

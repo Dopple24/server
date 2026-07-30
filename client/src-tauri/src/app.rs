@@ -35,39 +35,39 @@ pub enum TransferError {
     MetadataNotFound,
 }
 
+pub fn serve_public() {
+    let server = Server::http("0.0.0.0:8080").unwrap();
+    println!("Listening on port 8080");
+
+    for req in server.incoming_requests() {
+        let url = req.url().to_string();
+        let parts: Vec<&str> = url.split('/').collect();
+
+        // expects URLs like /dl/61b3bd2e-b5a1-40cd-a5d1-53214e9e6a73
+        match parts.as_slice() {
+            ["", "dl", uuid_str] => match Uuid::from_str(uuid_str) {
+                Ok(uuid) => guest_request_file::handle_download(req, &uuid),
+                Err(_) => {
+                    let response =
+                        tiny_http::Response::from_string("invalid uuid").with_status_code(400);
+                    req.respond(response).unwrap();
+                }
+            },
+            _ => {
+                let response = tiny_http::Response::from_string("not found").with_status_code(404);
+                req.respond(response).unwrap();
+            }
+        }
+    }
+}
+
 fn main() -> std::io::Result<()> {
     let args: Vec<String> = args().collect();
 
     let parts = get_parts_rw_lock();
 
     match args[1].as_str() {
-        "--serve_public" => {
-            let server = Server::http("0.0.0.0:8080").unwrap();
-            println!("Listening on port 8080");
-
-            for req in server.incoming_requests() {
-                let url = req.url().to_string();
-                let parts: Vec<&str> = url.split('/').collect();
-
-                // expects URLs like /dl/61b3bd2e-b5a1-40cd-a5d1-53214e9e6a73
-                match parts.as_slice() {
-                    ["", "dl", uuid_str] => match Uuid::from_str(uuid_str) {
-                        Ok(uuid) => guest_request_file::handle_download(req, &uuid),
-                        Err(_) => {
-                            let response = tiny_http::Response::from_string("invalid uuid")
-                                .with_status_code(400);
-                            req.respond(response).unwrap();
-                        }
-                    },
-                    _ => {
-                        let response =
-                            tiny_http::Response::from_string("not found").with_status_code(404);
-                        req.respond(response).unwrap();
-                    }
-                }
-            }
-            Ok(())
-        }
+        //"--serve_public" => {}
         /*"--send" => sending(
             TcpStream::connect(SOCKET)?,
             "./test.txt",
@@ -120,7 +120,7 @@ fn main() -> std::io::Result<()> {
         /*"--delete" => {
             delete_file::delete(TcpStream::connect(SOCKET)?, &args[2], &args[3], &args[4])
         }*/
-        "--share_link" => {
+        /*"--share_link" => {
             share_link::share_link(TcpStream::connect(SOCKET)?, &args[2], &args[3], &args[4], {
                 if args.len() > 5 {
                     &args[5]
@@ -128,7 +128,7 @@ fn main() -> std::io::Result<()> {
                     "1"
                 }
             })
-        }
+        }*/
         _ => {
             println!(
                 "Please enter an arg. Either --send for sending or --reinit for reinitialization"

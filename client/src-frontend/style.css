@@ -413,3 +413,68 @@ animation: shimmer 1.8s infinite;
     margin-top: 0.2rem;
     min-height: 1rem;
 }
+
+.success {
+color: var(--accent);
+min-height: 1.2rem;
+font-size: 0.9rem;
+}
+
+.share-inline {
+    margin: -0.5rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.3rem;
+}
+
+.share-hours-input {
+    width: 140px;
+}
+
+.share-result {
+    font-size: 0.78rem;
+    color: var(--text-dim);
+}
+
+.modal-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.55);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 1000;
+}
+
+.modal-box {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    padding: 1.5rem;
+    max-width: 420px;
+    width: 90%;
+    box-shadow: 0 20px 50px rgba(0, 0, 0, 0.4);
+}
+
+.modal-box h3 {
+    margin: 0 0 0.8rem 0;
+    color: var(--text);
+}
+
+.modal-message {
+    background: var(--panel-alt);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 0.7rem 0.9rem;
+    font-size: 0.85rem;
+    color: var(--text);
+    word-break: break-all;
+    font-family: monospace;
+}
+
+.modal-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 0.5rem;
+    margin-top: 1rem;
+}
