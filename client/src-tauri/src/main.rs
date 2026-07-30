@@ -3,6 +3,7 @@
 
 use std::{
     net::TcpStream,
+    path::Path,
     sync::{Arc, RwLock},
 };
 use tauri::State;
@@ -13,11 +14,12 @@ use tauri_plugin_dialog::DialogExt;
 use crate::{
     app::{get_parts_rw_lock, sending, SOCKET},
     login_attempt::login_attempt,
-    reinit::Parts,
+    reinit::{reinit, Parts},
 };
 
 mod app;
 mod auth;
+mod create_folder;
 mod delete_file;
 mod get_map;
 mod guest_request_file;
@@ -62,6 +64,20 @@ fn delete_file(username: &str, password: &str, uuid: &str) -> Result<(), String>
 }
 
 #[tauri::command]
+fn create_folder(
+    username: &str,
+    password: &str,
+    folder_uuid: &str,
+    folder_name: &str,
+) -> Result<(), String> {
+    let stream = TcpStream::connect(SOCKET).map_err(|e| e.to_string())?;
+    match create_folder::create_folder(stream, username, password, folder_uuid, folder_name) {
+        Ok(a) => Ok(a),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+#[tauri::command]
 async fn test_dialog(app: tauri::AppHandle) {
     println!("test_dialog called");
     let (tx, rx) = mpsc::channel();
@@ -81,7 +97,7 @@ async fn upload(
     folder_uuid: String,
     parts: State<'_, Arc<RwLock<Parts>>>,
     app: tauri::AppHandle,
-) -> Result<(), String> {
+) -> Result<String, String> {
     let (tx, rx) = mpsc::channel();
     app.dialog().file().pick_file(move |file_path| {
         let _ = tx.send(file_path.map(|p| p.to_string()));
@@ -97,7 +113,31 @@ async fn upload(
     let stream = TcpStream::connect(SOCKET).map_err(|e| e.to_string())?;
     println!("connected");
 
+    let file_name = Path::new(&path)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| {
+            eprintln!("invalid filename");
+            "invalid filename".to_string()
+        })?;
+
     match sending(stream, &path, parts, &username, &password, &folder_uuid) {
+        //<-- this panics
+        Ok(_) => Ok(file_name.to_string()),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+#[tauri::command]
+async fn upload_reinit(
+    username: String,
+    password: String,
+    send_uuid: String,
+    parts: State<'_, Arc<RwLock<Parts>>>,
+) -> Result<(), String> {
+    let stream = TcpStream::connect(SOCKET).map_err(|e| e.to_string())?;
+    println!("connected");
+    match reinit(stream, parts, &send_uuid, &username, &password) {
         Ok(a) => Ok(a),
         Err(e) => Err(e.to_string()),
     }
@@ -154,11 +194,13 @@ fn main() {
             request_map,
             try_login,
             upload,
+            upload_reinit,
             test_dialog,
             delete_file,
             download,
             download_reinit,
             request_parts,
+            create_folder
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

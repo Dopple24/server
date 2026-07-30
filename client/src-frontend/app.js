@@ -1,11 +1,13 @@
 const { invoke } = window.__TAURI__.core;
 
+const svg_icon = `<svg class=\"file-icon\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.8\"><path d=\"M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z\" /><path d=\"M14 2v6h6\" /></svg>`;
+
 const output = document.getElementById("output");
 const breadcrumb = document.getElementById("breadcrumb");
 const entryList = document.getElementById("entry-list");
 const upBtn = document.getElementById("up-btn");
 const uploadBtn = document.getElementById("upload-btn");
-const testBtn = document.getElementById("test-btn");
+const newFolderBtn = document.getElementById("new-folder-btn");
 
 const transferManager = document.getElementById("transfer-manager");
 const transferColumn = document.getElementById("transfer-column");
@@ -77,16 +79,30 @@ async function upload() {
     addTransferRow(transferId);
 
     try {
-        // if your Rust command reports progress via events, listen and call:
-        // updateTransferProgress(transferId, percent);
-        await invoke("upload", { username, password, folderUuid: currentFolderUuid() });
-        updateTransferProgress(transferId, 100);
+      let file_name = await invoke("upload", { username, password, folderUuid: currentFolderUuid() });
+        updateFileName(transferId, file_name)
+      updateTransferProgress(transferId, 100);
     } catch (err) {
-        showError(err);
+      showError(err);
     } finally {
-        removeTransferRow(transferId);
-        fetchMap();
+      removeTransferRow(transferId);
+      fetchMap();
+      loadPendingTransfers();
     }
+}
+
+async function uploadReinit(uuid) {
+  try {
+    let file_name = await invoke("upload_reinit", { username, password, sendUuid: uuid });
+    updateTransferProgress(uuid, 100);
+  }
+  catch (err) {
+      showError(err);
+  } finally {
+      removeTransferRow(uuid);
+    fetchMap();
+    loadPendingTransfers();
+  }
 }
 
 async function download(uuid) {
@@ -96,17 +112,20 @@ async function download(uuid) {
 }
 
 async function runDownload(transferId, uuid, isRetry) {
-    try {
-        if (isRetry) {
-            await invoke("download_reinit", { username, password, accUuid: uuid });
-        } else {
-            await invoke("download", { username, password, fileUuid: uuid });
-        }
-        setTransferSuccess(transferId);
-    } catch (err) {
-        const message = err?.toString?.() ?? String(err);
-        setTransferError(transferId, message, () => runDownload(transferId, uuid, true));
+  try {
+    if (isRetry) {
+      await invoke("download_reinit", { username, password, accUuid: uuid });
+    } else {
+      await invoke("download", { username, password, fileUuid: uuid });
     }
+    setTransferSuccess(transferId);
+  } catch (err) {
+    const message = err?.toString?.() ?? String(err);
+    setTransferError(transferId, message, () => runDownload(transferId, uuid, true));
+  } finally {
+    removeTransferRow(transferId);
+    loadPendingTransfers();
+  }
 }
 
 async function download_reinit(uuid) {
@@ -121,14 +140,16 @@ async function download_reinit(uuid) {
     } catch (err) {
         showError(err);
     } finally {
-        removeTransferRow(transferId);
+      removeTransferRow(transferId);
+      loadPendingTransfers();
     }
 }
 
-async function test() {
+async function newFolder(folderName) {
   try {
-    await invoke("test_dialog");
+    await invoke("create_folder", { username, password, folderUuid: currentFolderUuid(), folderName });
     fetchMap();
+    loadPendingTransfers();
   }
   catch (err) {
       showError(err);
@@ -242,7 +263,6 @@ async function fetchMap() {
 
 upBtn.addEventListener("click", goUp);
 uploadBtn.addEventListener("click", upload);
-testBtn.addEventListener("click", test);
 
 document.getElementById("logout-btn").addEventListener("click", () => {
     sessionStorage.removeItem("username");
@@ -287,13 +307,10 @@ function addTransferRow(id, filename) {
 
     const nameSpan = document.createElement("span");
     nameSpan.className = "file-name";
-    nameSpan.innerHTML = `
-        <svg class="file-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
-            <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
-            <path d="M14 2v6h6"/>
-        </svg>
-        ${filename ?? id}
-    `;
+    nameSpan.innerHTML =
+        `${svg_icon}
+        ${filename ?? id}`
+    ;
     item.appendChild(nameSpan);
 
     const percentSpan = document.createElement("span");
@@ -331,6 +348,12 @@ function updateTransferProgress(id, percent) {
     if (!row) return;
     row.querySelector(".file-percent").textContent = `${percent}%`;
     row.querySelector(".transfer-progress-bar").style.width = `${percent}%`;
+}
+
+function updateFileName(id, file_name) {
+    const row = transferColumn.querySelector(`.transfer-row[data-transfer-id="${id}"]`);
+    if (!row) return;
+    row.querySelector(".file-name").innerHTML = `${svg_icon}${file_name}`;
 }
 
 function removeTransferRow(id) {
@@ -395,19 +418,95 @@ async function loadPendingTransfers() {
         });
 
         parts.send.forEach((entry) => {
-            const transferId = crypto.randomUUID();
-            const filename = entry.real_path.split("/").pop();
-            addTransferRow(transferId, filename);
+          const filename = entry.filename;
+          console.log(entry);
+            addTransferRow(entry.uuid, filename);
             setTransferError(
-                transferId,
+                entry.uuid,
                 "Incomplete — resume to continue",
-                () => runUpload(transferId, entry.server_uuid, true) // once upload_reinit exists
+                () => uploadReinit(entry.uuid, true) // once upload_reinit exists
             );
         });
     } catch (err) {
         showError(err);
     }
 }
+
+function startNewFolderRow() {
+    if (entryList.querySelector(".new-folder-row")) return;
+
+    const emptyMsg = entryList.querySelector(".empty");
+    if (emptyMsg) emptyMsg.remove();
+
+    const row = document.createElement("div");
+    row.className = "entry-card new-folder-row";
+
+    const input = document.createElement("input");
+    input.type = "text";
+    input.className = "new-folder-input";
+    input.value = "New Folder";
+    row.appendChild(input);
+
+    const errorLine = document.createElement("div");
+    errorLine.className = "new-folder-error";
+    row.appendChild(errorLine);
+
+    entryList.prepend(row);
+    input.focus();
+    input.select();
+
+    let isSubmitting = false;
+
+    function cancel() {
+        row.remove();
+    }
+
+    async function confirm() {
+        if (isSubmitting) return;
+
+        const name = input.value.trim();
+        if (!name) {
+            cancel();
+            return;
+        }
+
+        isSubmitting = true;
+        input.disabled = true;
+        errorLine.textContent = "";
+
+        try {
+            await invoke("create_folder", {
+                username,
+                password,
+                folderUuid: currentFolderUuid(),
+                folderName: name,
+            });
+            row.remove();
+            fetchMap();
+            loadPendingTransfers();
+        } catch (err) {
+            errorLine.textContent = err?.toString?.() ?? String(err);
+            input.disabled = false;
+            isSubmitting = false;
+            input.focus();
+            input.select();
+        }
+    }
+
+    input.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") {
+            confirm();
+        } else if (e.key === "Escape") {
+            cancel();
+        }
+    });
+
+    input.addEventListener("blur", () => {
+        if (!isSubmitting) confirm();
+    });
+}
+
+newFolderBtn.addEventListener("click", startNewFolderRow);
 
 
 // Run automatically as soon as the page loads.

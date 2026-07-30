@@ -386,3 +386,30 @@ animation: shimmer 1.8s infinite;
     background: #2e2523;
     border-color: #7a3a35;
 }
+
+.new-folder-row {
+    padding: 0.5rem 0.9rem;
+}
+
+.new-folder-input {
+    width: 100%;
+    background: transparent;
+    border: none;
+    border-bottom: 1px solid var(--accent-dim);
+    border-radius: 0;
+    padding: 0.2rem 0;
+    font-size: 0.95rem;
+    font-weight: 600;
+    color: var(--text);
+}
+
+.new-folder-input:focus {
+    outline: none;
+}
+
+.new-folder-error {
+    color: var(--danger);
+    font-size: 0.78rem;
+    margin-top: 0.2rem;
+    min-height: 1rem;
+}

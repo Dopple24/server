@@ -7,10 +7,12 @@ use std::{
     os::unix::fs::FileExt,
     path::Path,
     println,
+    str::FromStr,
     sync::{Arc, Mutex, RwLock},
     thread,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
+use tauri::State;
 use uuid::Uuid;
 
 use crate::app::{
@@ -32,6 +34,7 @@ pub struct Parts {
 pub struct PartSend {
     pub uuid: Uuid,
     pub filename: String,
+    pub path: String,
 }
 
 #[derive(Deserialize, Serialize, Debug, Clone)]
@@ -88,18 +91,27 @@ impl Parts {
 
 pub fn reinit(
     mut stream: TcpStream,
-    parts: &Arc<RwLock<Parts>>,
+    parts: State<Arc<RwLock<Parts>>>,
+    send_uuid: &str,
     username: &str,
     password: &str,
 ) -> std::io::Result<()> {
-    let (filename, uuid) = {
-        let parts_lock = parts.read().unwrap();
-        (
-            parts_lock.send[0].filename.clone(),
-            parts_lock.send[0].uuid.clone(),
-        )
+    let send_uuid = match Uuid::from_str(send_uuid) {
+        Ok(u) => u,
+        Err(e) => {
+            eprintln!("failed to get uuid: {e:?}");
+            return Err(Error::last_os_error());
+        }
     };
-    let file_size = crate::app::get_file_size(Path::new(&filename)).unwrap();
+    let (file_name, uuid, path) = {
+        let parts_lock = parts.read().unwrap();
+        let part = match parts_lock.send.iter().find(|s| s.uuid == send_uuid) {
+            Some(p) => p,
+            None => return Err(Error::last_os_error()),
+        };
+        (part.filename.clone(), part.uuid.clone(), part.path.clone())
+    };
+    let file_size = crate::app::get_file_size(Path::new(&path)).unwrap();
     let first_message = first_message(10, &uuid, username, password);
     println!("uuid: {:?}", uuid);
     stream.write_all(&first_message)?;
@@ -107,7 +119,7 @@ pub fn reinit(
     stream.read(&mut buf)?;
     println!("buf: {}", buf[0]);
 
-    let fil = Arc::new(File::open(filename).unwrap());
+    let fil = Arc::new(File::open(path).unwrap());
 
     let chunks_len = (file_size / (CHUNK_SIZE - OVERHEAD) as u64) + 1;
 

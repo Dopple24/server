@@ -75,7 +75,7 @@ fn main() -> std::io::Result<()> {
             &args[2],
             &args[3],
         ),*/
-        "--reinit" => reinit(TcpStream::connect(SOCKET)?, &parts, &args[2], &args[3]),
+        /*"--reinit" => reinit(TcpStream::connect(SOCKET)?, &parts, &args[2], &args[3]),*/
         /*"--get" => {
             if args.len() < 5 {
                 println!(
@@ -211,6 +211,7 @@ pub fn sending(
     {
         let mut parts_write = parts.write().unwrap();
         parts_write.send.push(PartSend {
+            path: path_str.to_string(),
             uuid: transfer_uuid,
             filename: filename.to_string(),
         });
