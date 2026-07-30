@@ -1,3 +1,5 @@
+use crate::mapper::MapError;
+
 pub trait Code {
     fn get_code(&self) -> u8;
     fn get_message(&self) -> Vec<u8>;
@@ -90,5 +92,18 @@ impl Code for ErrorTransfer {
         };
         buffer.extend_from_slice(msg.as_bytes());
         buffer
+    }
+}
+
+impl From<MapError> for ErrorTransfer {
+    fn from(err: MapError) -> Self {
+        match err {
+            MapError::Io(_) => ErrorTransfer::InternalServerError,
+            MapError::Json(_) => ErrorTransfer::InternalServerError,
+            MapError::FolderNotFound(_) => ErrorTransfer::NotFound,
+            MapError::Poisoned => ErrorTransfer::InternalServerError,
+            MapError::FolderAlreadyPresent => ErrorTransfer::AlreadyInitialized,
+            MapError::InvalidFolderLocation => ErrorTransfer::InvalidFileName,
+        }
     }
 }

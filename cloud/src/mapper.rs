@@ -1,8 +1,9 @@
 use chrono::{DateTime, Local, Utc};
 use serde::{Deserialize, Serialize};
 use std::{
-    eprintln, fs, io,
-    iter::Map,
+    eprintln,
+    fs::{self, create_dir},
+    io,
     path::{Path, PathBuf},
     sync::{Arc, RwLock, RwLockReadGuard},
 };
@@ -214,6 +215,19 @@ impl Folder {
         }
         Err(ErrorTransfer::NotFound)
     }
+
+    pub fn new(name: &str, parent_path: &PathBuf, access: AccessControl) -> Self {
+        Folder {
+            uuid: Uuid::new_v4(),
+            name: name.to_string(),
+            last_changed_at: Local::now().to_utc(),
+            folders: Vec::new(),
+            files: Vec::new(),
+            path: parent_path.join(name),
+            is_locked: false,
+            access,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -226,6 +240,8 @@ pub enum MapError {
     FolderNotFound(Uuid),
     /// Another thread poisoned the lock by panicking while holding it.
     Poisoned,
+    FolderAlreadyPresent,
+    InvalidFolderLocation,
 }
 
 impl From<io::Error> for MapError {
@@ -301,6 +317,47 @@ impl MapStore {
                     .find_mut(target)
                     .ok_or(MapError::FolderNotFound(target))?;
                 folder.files.push(file);
+            }
+        }
+
+        persist(&guard)?;
+        Ok(())
+    }
+
+    pub fn create_folder(
+        &self,
+        folder_uuid: Option<Uuid>,
+        folder_name: &str,
+        access: AccessControl,
+    ) -> Result<(), MapError> {
+        let mut guard = self.inner.write().map_err(|_| MapError::Poisoned)?;
+        let guard_path = guard.path.clone();
+        match folder_uuid {
+            None => guard
+                .folders
+                .push(Folder::new(folder_name, &guard_path, access)),
+            Some(target) => {
+                let folder = guard
+                    .find_mut(target)
+                    .ok_or(MapError::FolderNotFound(target))?;
+                if folder
+                    .folders
+                    .iter()
+                    .find(|f| f.name == folder_name)
+                    .is_some()
+                {
+                    return Err(MapError::FolderAlreadyPresent);
+                };
+                match create_dir(folder.path.clone().join(folder_name)) {
+                    Ok(_) => (),
+                    Err(e) => {
+                        eprintln!("failed to create dir at : {e:?}");
+                        return Err(MapError::InvalidFolderLocation);
+                    }
+                };
+                folder
+                    .folders
+                    .push(Folder::new(folder_name, &folder.path, access));
             }
         }
 

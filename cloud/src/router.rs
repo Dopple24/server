@@ -1,6 +1,6 @@
 use crate::{
     auth::{self, login_api},
-    delete_file,
+    create_folder, delete_file,
     file_transfer::{CHUNK_SIZE, recieve, reinitialize},
     get_file, get_map, guest_request_file,
     mapper::MapStore,
@@ -81,6 +81,9 @@ pub fn handle_client(
             }
             RequestType::LoginAttempt => {
                 auth::attempt_login(stream);
+            }
+            RequestType::CreateFolder => {
+                create_folder::create_folder(stream, buffer, map_store, &client_uuid, offset);
             }
             _ => {
                 println!("shuting down");
