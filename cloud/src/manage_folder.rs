@@ -1,4 +1,4 @@
-use std::{fs::create_dir, io::Write, net::TcpStream};
+use std::{io::Write, net::TcpStream};
 
 use uuid::Uuid;
 
@@ -53,7 +53,37 @@ pub fn create_folder(
         is_editable_for: Vec::new(),
     };
 
-    match map_store.create_folder(Some(parent_folder_uuid), &folder_name, access) {
+    match map_store.create_folder(
+        Some(parent_folder_uuid),
+        &folder_name,
+        &*client_uuid,
+        access,
+    ) {
+        Ok(_) => {
+            let _ = stream.write_all(&[TransferSuccess::Ok.get_code()]);
+        }
+        Err(e) => {
+            let _ = stream.write_all(&[ErrorTransfer::from(e).get_code()]);
+        }
+    };
+}
+
+pub fn delete_folder(
+    mut stream: TcpStream,
+    first_message: [u8; CHUNK_SIZE],
+    map_store: MapStore,
+    client_uuid: &Uuid,
+    offset: usize,
+) {
+    println!("delete folder called");
+    let folder_uuid_beggining = offset;
+    let folder_uuid_end = offset + 16;
+    let folder_uuid = Uuid::from_bytes(
+        first_message[folder_uuid_beggining..folder_uuid_end]
+            .try_into()
+            .unwrap(),
+    );
+    match map_store.delete_folder(folder_uuid, client_uuid) {
         Ok(_) => {
             let _ = stream.write_all(&[TransferSuccess::Ok.get_code()]);
         }

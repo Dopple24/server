@@ -64,6 +64,15 @@ fn delete_file(username: &str, password: &str, uuid: &str) -> Result<(), String>
 }
 
 #[tauri::command]
+fn delete_folder(username: &str, password: &str, uuid: &str) -> Result<(), String> {
+    let stream = TcpStream::connect(SOCKET).map_err(|e| e.to_string())?;
+    match delete_file::delete_folder(stream, username, password, uuid) {
+        Ok(a) => Ok(a),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+#[tauri::command]
 fn create_folder(
     username: &str,
     password: &str,
@@ -197,6 +206,7 @@ fn main() {
             upload_reinit,
             test_dialog,
             delete_file,
+            delete_folder,
             download,
             download_reinit,
             request_parts,

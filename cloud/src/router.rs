@@ -1,8 +1,8 @@
 use crate::{
     auth::{self, login_api},
-    create_folder, delete_file,
+    delete_file,
     file_transfer::{CHUNK_SIZE, recieve, reinitialize},
-    get_file, get_map, guest_request_file,
+    get_file, get_map, guest_request_file, manage_folder,
     mapper::MapStore,
     request::RequestType,
     share_link::{self, LinkDatabase},
@@ -69,6 +69,9 @@ pub fn handle_client(
             RequestType::Delete => {
                 delete_file::delete_file(stream, buffer, map_store, &client_uuid, offset)
             }
+            RequestType::DeleteFolder => {
+                manage_folder::delete_folder(stream, buffer, map_store, &client_uuid, offset);
+            }
             RequestType::ShareLink => {
                 share_link::share_link(
                     stream,
@@ -83,7 +86,7 @@ pub fn handle_client(
                 auth::attempt_login(stream);
             }
             RequestType::CreateFolder => {
-                create_folder::create_folder(stream, buffer, map_store, &client_uuid, offset);
+                manage_folder::create_folder(stream, buffer, map_store, &client_uuid, offset);
             }
             _ => {
                 println!("shuting down");

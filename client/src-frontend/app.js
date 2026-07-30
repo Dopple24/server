@@ -182,18 +182,28 @@ function renderBreadcrumb() {
 }
 
 function buildFolderRow(folder) {
-    const row = document.createElement("div");
-    row.className = "entry-card folder-row";
+  const row = document.createElement("div");
+  row.className = "entry-card folder-row";
 
-    const title = document.createElement("div");
-    title.className = "entry-title";
-    title.textContent = `${folder.name}`;
-    row.appendChild(title);
+  const title = document.createElement("div");
+  title.className = "entry-title";
+  title.textContent = `${folder.name}`;
+  row.appendChild(title);
 
-    const meta = document.createElement("div");
-    meta.className = "entry-meta";
-    meta.textContent = `Updated ${formatDate(folder.last_changed_at)}`;
-    row.appendChild(meta);
+  const meta = document.createElement("div");
+  meta.className = "entry-meta";
+  meta.textContent = `Updated ${formatDate(folder.last_changed_at)}`;
+  row.appendChild(meta);
+
+  const delete_folder_btn = document.createElement("button");
+  delete_folder_btn.className = "delete-btn";
+  delete_folder_btn.textContent = "Delete";
+  delete_folder_btn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    deleteFolder(folder.uuid);
+  });
+
+  row.appendChild(delete_folder_btn);
 
     row.addEventListener("click", () => openFolder(folder));
     return row;
@@ -251,10 +261,11 @@ function render() {
 
 async function fetchMap() {
     clearError();
+    const savedPath = currentPathUuids();
+
     try {
-      rootFolder = await invoke("request_map", { username, password });
-      console.log(rootFolder);
-        pathStack = [rootFolder];
+        rootFolder = await invoke("request_map", { username, password });
+        pathStack = findPathByUuids(rootFolder, savedPath);
         render();
     } catch (err) {
         showError(err);
@@ -336,6 +347,16 @@ function addTransferRow(id, filename) {
 async function deleteFile(uuid) {
   try {
     await invoke("delete_file", { username, password, uuid });
+    fetchMap();
+  }
+  catch (err) {
+    showError(err)
+  }
+}
+
+async function deleteFolder(uuid) {
+  try {
+    await invoke("delete_folder", { username, password, uuid });
     fetchMap();
   }
   catch (err) {
@@ -508,6 +529,24 @@ function startNewFolderRow() {
 
 newFolderBtn.addEventListener("click", startNewFolderRow);
 
+function currentPathUuids() {
+    // Skip the root itself (index 0), since root has no "which child" info needed
+    return pathStack.slice(1).map((f) => f.uuid);
+}
+
+function findPathByUuids(root, uuids) {
+    const path = [root];
+    let current = root;
+
+    for (const uuid of uuids) {
+        const next = (current.folders || []).find((f) => f.uuid === uuid);
+        if (!next) break; // folder no longer exists (deleted, moved, etc.) — stop here
+        path.push(next);
+        current = next;
+    }
+
+    return path;
+}
 
 // Run automatically as soon as the page loads.
 fetchMap();

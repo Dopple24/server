@@ -2,7 +2,7 @@ use chrono::{DateTime, Local, Utc};
 use serde::{Deserialize, Serialize};
 use std::{
     eprintln,
-    fs::{self, create_dir},
+    fs::{self, create_dir, remove_dir_all},
     io,
     path::{Path, PathBuf},
     sync::{Arc, RwLock, RwLockReadGuard},
@@ -200,6 +200,26 @@ impl Folder {
         Err(ErrorTransfer::NotFound)
     }
 
+    pub fn find_folder_parent(
+        &mut self,
+        target: &Uuid,
+        client_uuid: &Uuid,
+    ) -> Result<&mut Self, MapError> {
+        if let Some(f) = self.folders.iter().find(|f| &f.uuid == target) {
+            return if f.access.can_view(client_uuid) {
+                Ok(self)
+            } else {
+                Err(MapError::InvalidFolderLocation)
+            };
+        }
+        for folder in &mut self.folders {
+            if let Ok(parent) = folder.find_folder_parent(target, client_uuid) {
+                return Ok(parent);
+            }
+        }
+        Err(MapError::InvalidFolderLocation)
+    }
+
     pub fn find_file_clone(&self, target: &Uuid, client_uuid: &Uuid) -> Result<Fil, ErrorTransfer> {
         if let Some(f) = self.files.iter().find(|f| &f.uuid == target) {
             return if f.access.can_view(client_uuid) {
@@ -324,31 +344,81 @@ impl MapStore {
         Ok(())
     }
 
+    pub fn delete_folder(&self, folder_uuid: Uuid, client_uuid: &Uuid) -> Result<(), MapError> {
+        let mut guard = self.inner.write().map_err(|_| MapError::Poisoned)?;
+        let folder = guard
+            .find_mut(folder_uuid)
+            .ok_or(MapError::FolderNotFound(folder_uuid))?;
+
+        if !folder.access.can_edit(client_uuid) {
+            return Err(MapError::InvalidFolderLocation);
+        }
+
+        match remove_dir_all(folder.path.clone()) {
+            Ok(_) => (),
+            Err(e) => {
+                eprintln!("failed to delete dir: {e:?}");
+                return Err(MapError::InvalidFolderLocation);
+            }
+        };
+
+        let folder_uuid = folder.uuid;
+
+        println!("folder.folders: {:?}", folder.folders);
+        match guard.find_folder_parent(&folder_uuid, client_uuid) {
+            Ok(f) => f,
+            Err(e) => {
+                eprintln!("failed to find folder parent: {e:?}");
+                return Err(e);
+            }
+        }
+        .folders
+        .retain(|f| {
+            let should_retain = f.uuid != folder_uuid;
+            if should_retain {
+                println!("f.uuid: {:?}, folder_uuid: {:?}", f.uuid, folder_uuid);
+            }
+            should_retain
+        });
+        persist(&guard)
+    }
+
     pub fn create_folder(
         &self,
         folder_uuid: Option<Uuid>,
         folder_name: &str,
+        client_uuid: &Uuid,
         access: AccessControl,
     ) -> Result<(), MapError> {
+        let folder_name = match sanitized_folder_name(folder_name) {
+            Ok(n) => n,
+            Err(e) => {
+                eprintln!("invalid file name: {e:?}");
+                return Err(MapError::InvalidFolderLocation);
+            }
+        };
         let mut guard = self.inner.write().map_err(|_| MapError::Poisoned)?;
         let guard_path = guard.path.clone();
         match folder_uuid {
             None => guard
                 .folders
-                .push(Folder::new(folder_name, &guard_path, access)),
+                .push(Folder::new(&folder_name, &guard_path, access)),
             Some(target) => {
                 let folder = guard
                     .find_mut(target)
                     .ok_or(MapError::FolderNotFound(target))?;
+                if !folder.access.can_edit(client_uuid) {
+                    return Err(MapError::InvalidFolderLocation);
+                }
                 if folder
                     .folders
                     .iter()
-                    .find(|f| f.name == folder_name)
+                    .find(|f| &f.name == &folder_name)
                     .is_some()
                 {
                     return Err(MapError::FolderAlreadyPresent);
                 };
-                match create_dir(folder.path.clone().join(folder_name)) {
+                match create_dir(folder.path.clone().join(&folder_name)) {
                     Ok(_) => (),
                     Err(e) => {
                         eprintln!("failed to create dir at : {e:?}");
@@ -357,7 +427,7 @@ impl MapStore {
                 };
                 folder
                     .folders
-                    .push(Folder::new(folder_name, &folder.path, access));
+                    .push(Folder::new(&folder_name, &folder.path, access));
             }
         }
 
@@ -401,6 +471,16 @@ impl MapStore {
     pub fn read(&self) -> Result<RwLockReadGuard<'_, Folder>, MapError> {
         self.inner.read().map_err(|_| MapError::Poisoned)
     }
+}
+
+fn sanitized_folder_name(folder_name: &str) -> Result<String, String> {
+    let name = Path::new(folder_name)
+        .file_name()
+        .ok_or_else(|| "invalid folder name".to_string())?
+        .to_str()
+        .ok_or_else(|| "folder name is not valid UTF-8".to_string())?;
+
+    Ok(name.to_string())
 }
 
 pub fn with_file_mut<T>(

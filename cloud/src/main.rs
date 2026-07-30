@@ -7,13 +7,13 @@ use std::{
 use crate::mapper::MapStore;
 
 mod auth;
-mod create_folder;
 mod delete_file;
 mod errors;
 mod file_transfer;
 mod get_file;
 mod get_map;
 mod guest_request_file;
+mod manage_folder;
 mod mapper;
 mod request;
 mod response;

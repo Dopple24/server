@@ -17,6 +17,7 @@ pub enum RequestType {
     Register,
     Unknown,
     Delete,
+    DeleteFolder,
     GuestRequestFile,
     ShareLink,
     LoginAttempt,
@@ -40,6 +41,7 @@ impl RequestType {
             50 => Self::CreateFolder,
             100 => Self::ShareLink,
             200 => Self::GuestRequestFile,
+            254 => Self::DeleteFolder,
             255 => Self::Delete,
             _ => Self::Unknown,
         }
