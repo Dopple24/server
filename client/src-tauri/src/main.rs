@@ -172,6 +172,7 @@ async fn download(
     username: String,
     password: String,
     file_uuid: String,
+    frontend_uuid: String,
     parts: State<'_, Arc<RwLock<Parts>>>,
     app: tauri::AppHandle,
 ) -> Result<(), String> {
@@ -187,7 +188,17 @@ async fn download(
     println!("download called");
     let stream = TcpStream::connect(SOCKET).map_err(|e| e.to_string())?;
     println!("connected");
-    match request_file::request(stream, 10, parts, &username, &password, &file_uuid, &path) {
+    match request_file::request(
+        stream,
+        10,
+        parts,
+        &username,
+        &password,
+        &file_uuid,
+        &path,
+        &frontend_uuid,
+        app,
+    ) {
         Ok(a) => Ok(a),
         Err(e) => Err(e.to_string()),
     }
@@ -199,10 +210,21 @@ async fn download_reinit(
     password: String,
     acc_uuid: String,
     parts: State<'_, Arc<RwLock<Parts>>>,
+    frontend_uuid: String,
+    app: tauri::AppHandle,
 ) -> Result<(), String> {
     let stream = TcpStream::connect(SOCKET).map_err(|e| e.to_string())?;
     println!("connected");
-    match request_file::reinitialize(stream, parts, 10, &acc_uuid, &username, &password) {
+    match request_file::reinitialize(
+        stream,
+        parts,
+        10,
+        &acc_uuid,
+        &username,
+        &password,
+        &frontend_uuid,
+        app,
+    ) {
         Ok(a) => Ok(a),
         Err(e) => Err(e.to_string()),
     }

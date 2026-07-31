@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex, RwLock};
 use std::thread::{self, JoinHandle};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use tauri::State;
+use tauri::{AppHandle, Emitter, State};
 use uuid::Uuid;
 
 use crate::reinit::{first_message, PartAcc, Parts};
@@ -35,6 +35,12 @@ const MSG_COMPLETION_REQUEST: u8 = 3;
 const MSG_COMPLETION_RESPONSE: u8 = 23;
 const MSG_HASH_REQUEST: u8 = 4;
 const MSG_HASH_RESPONSE: u8 = 24;
+
+#[derive(serde::Serialize, Clone)]
+struct ProgressPayload {
+    transfer_id: String,
+    percent: u8,
+}
 
 #[derive(Serialize, Deserialize)]
 struct ConfigFile {
@@ -74,19 +80,20 @@ pub fn request(
     parts: State<Arc<RwLock<Parts>>>,
     username: &str,
     password: &str,
-    file_uuid: &str,
+    fil_uuid: &str,
     path_for_the_requested_file: &str,
+    frontend_uuid: &str,
+    app: AppHandle,
 ) -> io::Result<()> {
     let path = Path::new(path_for_the_requested_file);
     let filename = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
 
-    let file_uuid = Uuid::from_str(file_uuid)
+    let file_uuid = Uuid::from_str(fil_uuid)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, format!("bad uuid: {e}")))?;
 
     stream.write_all(&first_message(5, &file_uuid, username, password))?;
 
     let (code, chunks_len) = read_handshake_response(&mut stream)?;
-    println!("code: {code:?}");
     match code {
         MSG_ACK_OK => {
             let temp_path = format!("{TEMP_FOLDER_LOCATION}/{filename}");
@@ -108,6 +115,8 @@ pub fn request(
                 path_for_the_requested_file,
                 max_workers,
                 chunks_len,
+                app,
+                frontend_uuid,
             )
             .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("{e:?}")))?;
 
@@ -137,6 +146,8 @@ pub fn reinitialize(
     acc_uuid: &str,
     username: &str,
     password: &str,
+    frontend_uuid: &str,
+    app: AppHandle,
 ) -> io::Result<()> {
     let (real_path, temp_path, file_uuid) = {
         let uuid = Uuid::from_str(acc_uuid).map_err(|e| {
@@ -202,8 +213,15 @@ pub fn reinitialize(
 
     let chunk_log: ChunkLog = Arc::new(Mutex::new(config_file.transfered_chunks.clone()));
 
-    run_transfer_loop(stream, &transfered_file, max_workers, chunk_log)
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("{e:?}")))?;
+    run_transfer_loop(
+        stream,
+        &transfered_file,
+        max_workers,
+        chunk_log,
+        app,
+        frontend_uuid,
+    )
+    .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("{e:?}")))?;
 
     finalize_transfer(&transfered_file)?;
 
@@ -226,6 +244,8 @@ fn receive_file(
     real_path: &str,
     max_workers: usize,
     file_size_chunks: u64,
+    app: AppHandle,
+    frontend_uuid: &str,
 ) -> Result<(), ErrorTransfer> {
     let transfered_file = init_transfer(temp_path, real_path, file_size_chunks)?;
     setup_config(&transfered_file).map_err(|_| ErrorTransfer::InternalServerError)?;
@@ -233,7 +253,14 @@ fn receive_file(
     let transfered_file = Arc::new(transfered_file);
     let chunk_log: ChunkLog = Arc::new(Mutex::new(HashSet::new()));
 
-    run_transfer_loop(stream, &transfered_file, max_workers, chunk_log)?;
+    run_transfer_loop(
+        stream,
+        &transfered_file,
+        max_workers,
+        chunk_log,
+        app,
+        frontend_uuid,
+    )?;
     finalize_transfer(&transfered_file).map_err(|_| ErrorTransfer::InternalServerError)?;
     Ok(())
 }
@@ -247,6 +274,8 @@ fn run_transfer_loop(
     transfered_file: &Arc<TransferedFile>,
     max_workers: usize,
     chunk_log: ChunkLog,
+    app: AppHandle,
+    frontend_uuid: &str,
 ) -> Result<(), ErrorTransfer> {
     println!("started run transfer loop");
     let writer_stream = stream
@@ -264,8 +293,10 @@ fn run_transfer_loop(
         let tx = tx.clone();
         let chunk_log = chunk_log.clone();
         let file = transfered_file.clone();
+        let app = app.clone();
+        let frontend_uuid = frontend_uuid.to_string().clone();
         worker_handles.push(thread::spawn(move || {
-            disk_writer_worker(job_rx, tx, chunk_log, file)
+            disk_writer_worker(job_rx, tx, chunk_log, file, app, &frontend_uuid)
         }));
     }
     // drop our own senders so the channel closes once the reader loop stops feeding it
@@ -355,7 +386,6 @@ fn reader_loop(
             MSG_COMPLETION_REQUEST => {
                 let response =
                     build_completion_response(chunk_log, transfered_file.file_size_chunks);
-                println!("response: {response:?}");
                 if resp_tx.send(response).is_err() {
                     return Err(ErrorTransfer::InternalServerError);
                 }
@@ -380,9 +410,6 @@ fn build_completion_response(chunk_log: &ChunkLog, file_size_chunks: u64) -> Vec
     let mut buf = Vec::with_capacity(9 + missing.len() * 8);
     buf.push(MSG_COMPLETION_RESPONSE);
     buf.extend_from_slice(&(missing.len() as u64).to_be_bytes());
-    println!("missing.len(): {}", missing.len());
-    println!("missing.len(): {:?}", (missing.len() as u64).to_be_bytes());
-    println!("buf: {:?}", buf);
 
     for id in missing {
         buf.extend_from_slice(&id.to_be_bytes());
@@ -395,6 +422,8 @@ fn disk_writer_worker(
     tx: SyncSender<Vec<u8>>,
     chunk_log: ChunkLog,
     transfered_file: Arc<TransferedFile>,
+    app: AppHandle,
+    frontend_uuid: &str,
 ) {
     loop {
         let job = {
@@ -414,6 +443,18 @@ fn disk_writer_worker(
                 drop(log);
                 if count % 32 == 0 {
                     let _ = update_config(&transfered_file.config_path, &chunk_log);
+                    let count = { chunk_log.lock().unwrap().len() };
+
+                    let percent =
+                        ((count as f64 / transfered_file.file_size_chunks as f64) * 100.0) as u8;
+                    println!("emiting {percent}%");
+                    let _ = app.emit(
+                        "transfer-progress",
+                        ProgressPayload {
+                            transfer_id: frontend_uuid.to_string(),
+                            percent,
+                        },
+                    );
                 }
                 build_ack(MSG_ACK_OK, job.chunk_id)
             }
@@ -437,15 +478,12 @@ fn build_ack(code: u8, chunk_id: u64) -> Vec<u8> {
 }
 
 fn init_writer(mut stream: TcpStream) -> (SyncSender<Vec<u8>>, JoinHandle<()>) {
-    println!("init writer");
     let (tx, rx) = sync_channel::<Vec<u8>>(MAX_IN_FLIGHT_JOBS);
     let handle = thread::spawn(move || {
         for bytes in rx {
             if let Err(e) = stream.write_all(&bytes) {
                 eprintln!("writer: write failed: {e:?}");
                 break;
-            } else {
-                println!("bytes written: {bytes:?}")
             }
         }
     });

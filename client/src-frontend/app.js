@@ -1,4 +1,10 @@
 const { invoke } = window.__TAURI__.core;
+const { listen } = window.__TAURI__.event;
+
+listen('transfer-progress', (event) => {
+  const { transfer_id, percent } = event.payload;
+  updateTransferProgress(transfer_id, percent);
+});
 
 const svg_icon = `<svg class=\"file-icon\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.8\"><path d=\"M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z\" /><path d=\"M14 2v6h6\" /></svg>`;
 
@@ -112,17 +118,25 @@ async function download(uuid) {
 }
 
 async function runDownload(transferId, uuid, isRetry) {
+  console.log(`transfer id ${transferId}`);
+  const unlisten = await listen('transfer-progress', (event) => {
+    if (event.payload.transfer_id === transferId) {
+      updateTransferProgress(transferId, event.payload.percent);
+    }
+  });
+
   try {
     if (isRetry) {
-      await invoke("download_reinit", { username, password, accUuid: uuid });
+      await invoke("download_reinit", { username, password, accUuid: uuid, frontendUuid: transferId });
     } else {
-      await invoke("download", { username, password, fileUuid: uuid });
+      await invoke("download", { username, password, fileUuid: uuid, frontendUuid: transferId });
     }
     setTransferSuccess(transferId);
   } catch (err) {
     const message = err?.toString?.() ?? String(err);
     setTransferError(transferId, message, () => runDownload(transferId, uuid, true));
   } finally {
+    unlisten();
     removeTransferRow(transferId);
     loadPendingTransfers();
   }

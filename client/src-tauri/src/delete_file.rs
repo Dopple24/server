@@ -20,7 +20,6 @@ pub fn delete(mut stream: TcpStream, username: &str, pass: &str, uuid: &str) -> 
     stream.write_all(&first_message(255, &file_uuid, username, pass));
     let mut buf = [0u8; 1];
     stream.read_exact(&mut buf);
-    println!("deletion ended with code: {}", buf[0]);
     Ok(())
 }
 
