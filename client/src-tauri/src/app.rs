@@ -1,5 +1,5 @@
 use crate::reinit::{reinit, PartSend, Parts};
-use crate::request_file::request;
+use crate::request_file::{request, ProgressPayload};
 use crate::{auth, delete_file, get_map, guest_request_file, request_file, share_link};
 use blake3::{Hash, Hasher};
 use std::collections::HashMap;
@@ -15,7 +15,7 @@ use std::sync::{Arc, Mutex, RwLock};
 use std::thread;
 use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
-use tauri::State;
+use tauri::{AppHandle, Emitter, State};
 use tiny_http::Server;
 use uuid::Uuid;
 
@@ -172,14 +172,14 @@ pub fn sending(
     username: &str,
     password: &str,
     folder_uuid: &str,
+    frontend_uuid: &str,
+    app: AppHandle,
 ) -> std::io::Result<()> {
-    println!("{folder_uuid}");
     let path = Path::new(path_str);
 
     // Or with a default fallback:
     let filename = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
 
-    println!("path {:?}", Path::new(path));
     let file_size = get_file_size(Path::new(path)).unwrap();
     let transfer_uuid = Uuid::new_v4();
     let folder_uuid = match Uuid::from_str(folder_uuid) {
@@ -189,7 +189,7 @@ pub fn sending(
             return Err(Error::last_os_error());
         }
     };
-    println!("folder_uuid: {folder_uuid:?}");
+
     let resp = send(
         &mut stream,
         file_size,
@@ -200,11 +200,7 @@ pub fn sending(
         &folder_uuid,
     )?;
 
-    println!("response code: {:?}", &resp.clone()[0]);
-    println!("response: {}", String::from_utf8_lossy(&resp[1..]));
-
     if &resp.clone()[0] != &20 {
-        println!("{}", &resp.clone()[0]);
         return Ok(());
     }
 
@@ -253,12 +249,28 @@ pub fn sending(
             let stream_clone = arc_stream.clone();
             let file_clone = fil.clone();
             let chunks_in_flight = chunks_in_flight.clone();
+            let app = app.clone();
+            let frontend_uuid = frontend_uuid.to_string().clone();
             handles.push(thread::spawn(move || {
-                println!("worker #{} initialized", i);
                 let mut counter = 0;
                 loop {
-                    if in_flight.lock().unwrap().clone() > 5 {
+                    let in_f_c = in_flight.lock().unwrap().clone();
+                    if in_f_c > 5 {
                         counter += 1;
+                        let count = {
+                            let guard = chunks.lock().unwrap_or_else(|e| e.into_inner());
+                            guard.len()
+                        } as f64
+                            - in_f_c as f64;
+                        let percent = (((chunks_len as f64 - count) as f64 / chunks_len as f64)
+                            * 100.0) as u8;
+                        let _ = app.emit(
+                            "transfer-progress",
+                            ProgressPayload {
+                                transfer_id: frontend_uuid.to_string(),
+                                percent,
+                            },
+                        );
                         thread::sleep(Duration::from_millis(50));
                         if counter >= 10 {
                             let mut now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
@@ -270,7 +282,6 @@ pub fn sending(
                             counter = 0;
                             let mut in_f = in_flight.lock().unwrap();
                             *in_f -= removed.len() as isize;
-                            println!("in flight: {in_f}");
                         }
                         continue;
                     }
@@ -278,7 +289,6 @@ pub fn sending(
 
                     if let Some(index) = chunk {
                         counter = 0;
-                        println!("worker #{} took chunk #{:?}", i, chunk);
                         let remaining = file_size - (CHUNK_SIZE - OVERHEAD) as u64 * index;
                         let chunk_size = remaining.min((CHUNK_SIZE - OVERHEAD) as u64) as usize;
 
@@ -297,9 +307,7 @@ pub fn sending(
                             }
                             Err(_) => {}
                         };
-                        println!("in_flight is now: {:?}", in_flight.lock().unwrap());
                     } else {
-                        println!("#{i} died");
                         *dead_threads.lock().unwrap() += 1;
                         break;
                     }
@@ -318,21 +326,17 @@ pub fn sending(
 
             match n {
                 Ok(0) => {
-                    println!("closed");
                     break;
                 } // connection closed
                 Ok(_) => {
                     if resp[0] != 0 {
-                        println!("{:?}", resp[0]);
                         if resp[0] == 20 {
                             let id = u64::from_be_bytes(resp[8..].try_into().unwrap());
                             chunks_in_flight.lock().unwrap().remove(&id);
                         }
 
                         *in_flight.lock().unwrap() -= 1;
-                        println!("subtracted");
                     } else {
-                        println!("{:?}", resp);
                         std::thread::sleep(std::time::Duration::from_millis(10));
                         continue;
                     }
@@ -348,19 +352,15 @@ pub fn sending(
 
             in_f = in_flight.lock().unwrap().clone();
         }
-        println!("here");
         handles.into_iter().for_each(|handle| {
             handle.join();
         });
-        println!("there");
 
         let mut buf = vec![0u8; 1];
         buf[0] = 3;
         let mut stream = arc_stream.lock().unwrap();
 
         stream.write_all(&buf).unwrap();
-
-        println!("sent");
 
         // client: read count first
 
@@ -383,18 +383,12 @@ pub fn sending(
             };
         }
 
-        println!("code: {:?}", response_code);
-
         let code = response_code[0];
-
-        println!("response_code: {code}");
 
         let mut count_buf = vec![0u8; 8];
         stream.read_exact(&mut count_buf).map_err(|e| return e)?;
 
         let count = u64::from_be_bytes(count_buf.try_into().unwrap());
-
-        println!("total missing: {:?}", count);
 
         if count == 0 {
             break;
@@ -412,8 +406,6 @@ pub fn sending(
     }
 
     let mut stream = arc_stream.lock().unwrap();
-
-    println!("waiting for server");
 
     loop {
         let mut buf = [0u8; 1];
@@ -442,8 +434,6 @@ pub fn sending(
     buf[0] = 4;
 
     stream.write_all(&buf).unwrap();
-
-    println!("sent {:?}", buf);
 
     loop {
         let mut buf = [0u8; 1];
@@ -488,7 +478,6 @@ pub fn get_file_size(path: &Path) -> Result<u64, TransferError> {
         Ok(md) => md.len(),
         Err(_) => return Err(TransferError::MetadataNotFound),
     };
-    println!("size: {size}");
     Ok(size)
 }
 
@@ -514,8 +503,6 @@ fn send(
 ) -> Result<[u8; 128], Error> {
     let file_size = data;
 
-    println!("{:?}", transfer_uuid);
-
     let size = encode_file_size(file_size);
 
     let mut buffer = Vec::new();
@@ -534,13 +521,6 @@ fn send(
     buffer.extend_from_slice(&file_name);
     buffer.extend_from_slice(&folder_uuid.to_bytes_le());
     //buffer.extend_from_slice(&msg);
-
-    println!(
-        "folder uuid: {:?},
-        test uuid: {:?}",
-        folder_uuid,
-        Uuid::from_bytes(folder_uuid.to_bytes_le())
-    );
 
     match stream.write_all(&buffer) {
         Ok(_) => (),
@@ -566,19 +546,12 @@ pub fn send_chunk(stream: &Arc<Mutex<TcpStream>>, id: u64, data: &[u8]) -> Resul
     buffer.extend_from_slice(&chunk_size.to_be_bytes());
     buffer.extend_from_slice(&msg);
 
-    println!(
-        "sending: 2, {:?}, {:?}, {chunk_size}",
-        &transfer_id.to_be_bytes(),
-        &chunk_size.to_be_bytes(),
-    );
     {
-        println!("started writing");
         let mut lock = stream.lock().unwrap();
         match lock.write_all(&buffer) {
             Ok(_) => (),
             Err(y) => return Err(y),
         };
-        println!("stopped writing");
     }
     Ok(())
 }

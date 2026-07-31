@@ -37,9 +37,9 @@ const MSG_HASH_REQUEST: u8 = 4;
 const MSG_HASH_RESPONSE: u8 = 24;
 
 #[derive(serde::Serialize, Clone)]
-struct ProgressPayload {
-    transfer_id: String,
-    percent: u8,
+pub struct ProgressPayload {
+    pub transfer_id: String,
+    pub percent: u8,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -445,8 +445,8 @@ fn disk_writer_worker(
                     let _ = update_config(&transfered_file.config_path, &chunk_log);
                     let count = { chunk_log.lock().unwrap().len() };
 
-                    let percent =
-                        ((count as f64 / transfered_file.file_size_chunks as f64) * 100.0) as u8;
+                    let percent = ((count as f64 / transfered_file.file_size_chunks as f64) * 100.0)
+                        .min(100.0) as u8;
                     println!("emiting {percent}%");
                     let _ = app.emit(
                         "transfer-progress",

@@ -12,11 +12,12 @@ use std::{
     thread,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
-use tauri::State;
+use tauri::{AppHandle, Emitter, State};
 use uuid::Uuid;
 
-use crate::app::{
-    hash_file, send_chunk, CHUNK_SIZE, MAX_THREADS, NEW_PARTS_PATH, OVERHEAD, PARTS_PATH,
+use crate::{
+    app::{hash_file, send_chunk, CHUNK_SIZE, MAX_THREADS, NEW_PARTS_PATH, OVERHEAD, PARTS_PATH},
+    request_file::ProgressPayload,
 };
 
 #[derive(Deserialize, Serialize, Debug)]
@@ -95,6 +96,8 @@ pub fn reinit(
     send_uuid: &str,
     username: &str,
     password: &str,
+    frontend_uuid: &str,
+    app: AppHandle,
 ) -> std::io::Result<()> {
     let send_uuid = match Uuid::from_str(send_uuid) {
         Ok(u) => u,
@@ -147,12 +150,30 @@ pub fn reinit(
             let stream_clone = arc_stream.clone();
             let file_clone = fil.clone();
             let chunks_in_flight = chunks_in_flight.clone();
+            let app = app.clone();
+            let frontend_uuid = frontend_uuid.to_string().clone();
             handles.push(thread::spawn(move || {
                 println!("worker #{} initialized", i);
                 let mut counter = 0;
                 loop {
-                    if in_flight.lock().unwrap().clone() > 5 {
+                    let in_f_c = in_flight.lock().unwrap().clone();
+                    if in_f_c > 5 {
                         counter += 1;
+                        let count = {
+                            let guard = chunks.lock().unwrap_or_else(|e| e.into_inner());
+                            guard.len()
+                        } as f64
+                            - in_f_c as f64;
+                        let percent = (((chunks_len as f64 - count) as f64 / chunks_len as f64)
+                            * 100.0)
+                            .min(100.0) as u8;
+                        let _ = app.emit(
+                            "transfer-progress",
+                            ProgressPayload {
+                                transfer_id: frontend_uuid.to_string(),
+                                percent,
+                            },
+                        );
                         thread::sleep(Duration::from_millis(50));
                         if counter >= 10 {
                             let mut now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();

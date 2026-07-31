@@ -7,7 +7,7 @@ use std::{
     path::Path,
     sync::{Arc, RwLock},
 };
-use tauri::State;
+use tauri::{AppHandle, State};
 
 use std::sync::mpsc;
 use tauri_plugin_dialog::DialogExt;
@@ -119,6 +119,7 @@ async fn upload(
     username: String,
     password: String,
     folder_uuid: String,
+    frontend_uuid: String,
     parts: State<'_, Arc<RwLock<Parts>>>,
     app: tauri::AppHandle,
 ) -> Result<String, String> {
@@ -145,7 +146,16 @@ async fn upload(
             "invalid filename".to_string()
         })?;
 
-    match sending(stream, &path, parts, &username, &password, &folder_uuid) {
+    match sending(
+        stream,
+        &path,
+        parts,
+        &username,
+        &password,
+        &folder_uuid,
+        &frontend_uuid,
+        app,
+    ) {
         //<-- this panics
         Ok(_) => Ok(file_name.to_string()),
         Err(e) => Err(e.to_string()),
@@ -157,11 +167,21 @@ async fn upload_reinit(
     username: String,
     password: String,
     send_uuid: String,
+    frontend_uuid: String,
+    app: AppHandle,
     parts: State<'_, Arc<RwLock<Parts>>>,
 ) -> Result<(), String> {
     let stream = TcpStream::connect(SOCKET).map_err(|e| e.to_string())?;
     println!("connected");
-    match reinit(stream, parts, &send_uuid, &username, &password) {
+    match reinit(
+        stream,
+        parts,
+        &send_uuid,
+        &username,
+        &password,
+        &frontend_uuid,
+        app,
+    ) {
         Ok(a) => Ok(a),
         Err(e) => Err(e.to_string()),
     }

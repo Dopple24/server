@@ -81,31 +81,39 @@ function goUp() {
 }
 
 async function upload() {
-    const transferId = crypto.randomUUID();
-    addTransferRow(transferId);
-
-    try {
-      let file_name = await invoke("upload", { username, password, folderUuid: currentFolderUuid() });
-        updateFileName(transferId, file_name)
-      updateTransferProgress(transferId, 100);
-    } catch (err) {
-      showError(err);
-    } finally {
-      removeTransferRow(transferId);
-      fetchMap();
-      loadPendingTransfers();
-    }
+  const transferId = crypto.randomUUID();
+  addTransferRow(transferId);
+  try {
+    const file_name = await invoke("upload", {
+      username,
+      password,
+      folderUuid: currentFolderUuid(),
+      frontendUuid: transferId,
+    });
+    updateFileName(transferId, file_name);
+    updateTransferProgress(transferId, 100); // safety-net in case the last progress event was missed
+  } catch (err) {
+    showError(err);
+  } finally {
+    removeTransferRow(transferId);
+    fetchMap();
+    loadPendingTransfers();
+  }
 }
 
 async function uploadReinit(uuid) {
   try {
-    let file_name = await invoke("upload_reinit", { username, password, sendUuid: uuid });
-    updateTransferProgress(uuid, 100);
-  }
-  catch (err) {
-      showError(err);
+    const file_name = await invoke("upload_reinit", {
+      username,
+      password,
+      sendUuid: uuid,
+      frontendUuid: uuid,
+    });
+    updateTransferProgress(uuid, 100); // safety-net, same reasoning as above
+  } catch (err) {
+    showError(err);
   } finally {
-      removeTransferRow(uuid);
+    removeTransferRow(uuid);
     fetchMap();
     loadPendingTransfers();
   }
