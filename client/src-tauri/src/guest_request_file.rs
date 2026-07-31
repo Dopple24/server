@@ -12,7 +12,7 @@ use crate::app::{CHUNK_SIZE, SOCKET};
 use tiny_http::{Header, Request, Response, StatusCode};
 
 fn request_to_writer<W: Write>(mut stream: TcpStream, uuid: &Uuid, mut out: W) -> Result<()> {
-    let mut meta = [0u8; 5];
+    let mut meta = [0u8; 9];
     stream
         .read_exact(&mut meta)
         .expect("failed to read metadata from storage server");
@@ -20,8 +20,8 @@ fn request_to_writer<W: Write>(mut stream: TcpStream, uuid: &Uuid, mut out: W) -
         meta[0], 20,
         "unexpected opcode in metadata response, expected 20"
     );
-    let chunks_len = u32::from_be_bytes(
-        meta[1..5]
+    let chunks_len = u64::from_be_bytes(
+        meta[1..9]
             .try_into()
             .expect("failed to parse chunks_len from metadata"),
     ) as u64;

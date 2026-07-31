@@ -120,9 +120,9 @@ pub fn guest_request_file(
         }
     }
 
-    let mut buf = [0u8; 5];
+    let mut buf = [0u8; 9];
     buf[0] = 20;
-    buf[1..5].copy_from_slice(&chunks_len.to_be_bytes());
+    buf[1..9].copy_from_slice(&chunks_len.to_be_bytes());
 
     match stream.write_all(&buf) {
         Ok(_) => (),

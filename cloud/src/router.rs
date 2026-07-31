@@ -55,8 +55,9 @@ pub fn handle_client(
                 map_store,
                 &client_uuid,
                 offset,
+                false,
             ),
-            RequestType::ReinitGetFile => get_file::reinit_send_file(
+            RequestType::ReinitGetFile => get_file::send_file(
                 stream,
                 buffer,
                 max_workers,
@@ -64,6 +65,7 @@ pub fn handle_client(
                 map_store,
                 &client_uuid,
                 offset,
+                true,
             ),
             RequestType::GetMap => get_map::get_map(stream, map_store, &client_uuid),
             RequestType::Delete => {

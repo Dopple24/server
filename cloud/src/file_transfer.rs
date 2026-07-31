@@ -27,7 +27,7 @@ use uuid::Uuid;
 
 pub const CHUNK_SIZE: usize = 32768;
 pub const OVERHEAD: usize = 11;
-const MAX_STORED: usize = 20;
+pub const MAX_STORED: usize = 20;
 const TEMP_FOLDER_LOCATION: &str = "./temp";
 const STORAGE_FOLDER_LOCATION: &str = "./storage";
 

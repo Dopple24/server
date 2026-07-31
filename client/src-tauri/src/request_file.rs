@@ -1,87 +1,72 @@
 use blake3::{Hash, Hasher};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
-use std::fmt::format;
 use std::fs;
-use std::fs::create_dir_all;
-use std::fs::read_dir;
-use std::fs::{File, OpenOptions};
-use std::io::{self, Read, Seek, SeekFrom, Write};
-use std::io::{BufReader, Error};
+use std::fs::{create_dir_all, read_dir, File, OpenOptions};
+use std::io::{self, BufReader, Read, Seek, SeekFrom, Write};
 use std::net::TcpStream;
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
-use std::sync::RwLock;
-use std::sync::{Arc, Mutex};
-use std::thread::JoinHandle;
-use std::time::{Duration, SystemTime};
-use std::{
-    thread,
-    time::{self, UNIX_EPOCH},
-};
+use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
+use std::sync::{Arc, Mutex, RwLock};
+use std::thread::{self, JoinHandle};
+use std::time::{SystemTime, UNIX_EPOCH};
+
 use tauri::State;
 use uuid::Uuid;
 
-use crate::reinit::first_message;
-use crate::reinit::PartAcc;
-use crate::reinit::Parts;
-use crate::response::ErrorTransfer;
-use crate::response::TransferSuccess;
-use crate::response::{self, Code};
+use crate::reinit::{first_message, PartAcc, Parts};
+use crate::response::{self, Code, ErrorTransfer, TransferSuccess};
 
+// --- protocol constants: must match the sender exactly ---
 pub const CHUNK_SIZE: usize = 32768;
-const OVERHEAD: usize = 11;
-const MAX_STORED: usize = 20;
+const OVERHEAD: usize = 17; // 1 (type) + 8 (chunk_id) + 8 (payload_len)
+const MAX_IN_FLIGHT_JOBS: usize = 64; // bound on chunks buffered between reader and disk-writer workers
+
 const TEMP_FOLDER_LOCATION: &str = "./temp";
 const STORAGE_FOLDER_LOCATION: &str = "./storage";
+
+// message types
+const MSG_ACK_OK: u8 = 20;
+const MSG_ACK_FAIL: u8 = 44;
+const MSG_CHUNK: u8 = 2;
+const MSG_COMPLETION_REQUEST: u8 = 3;
+const MSG_COMPLETION_RESPONSE: u8 = 23;
+const MSG_HASH_REQUEST: u8 = 4;
+const MSG_HASH_RESPONSE: u8 = 24;
 
 #[derive(Serialize, Deserialize)]
 struct ConfigFile {
     last_changed_at: u64,
-    file_size_chunks: usize,
-    transfered_chunks: HashSet<usize>,
+    file_size_chunks: u64,
+    transfered_chunks: HashSet<u64>,
     owner: Vec<Uuid>,
     is_public: bool,
 }
 
-struct SendChunk {
-    request_tape: u8,
-    header: Vec<u8>,
-    body: Vec<u8>,
-}
-
 #[derive(Debug)]
 struct TransferedFile {
-    file_size_chunks: usize,
+    file_size_chunks: u64,
     storage_path: PathBuf,
     temp_path: PathBuf,
     config_path: Mutex<PathBuf>,
     file: Arc<File>,
 }
 
-#[derive(Clone)]
-pub struct Transfer {
-    pub chunks: Vec<[u8; CHUNK_SIZE]>,
-    pub responses: Vec<[u8; 16]>,
-    pub should_die: bool,
-    pub max_workers: usize,
-    pub dead_workers: usize,
-    pub chunk_log: HashSet<usize>,
+/// A chunk that's been fully read off the wire and is ready to be written to disk.
+struct ChunkJob {
+    chunk_id: u64,
+    payload: Vec<u8>,
 }
 
-impl Transfer {
-    pub fn new(max_workers: usize) -> Self {
-        Transfer {
-            chunk_log: HashSet::new(),
-            chunks: Vec::new(),
-            responses: Vec::new(),
-            should_die: false,
-            max_workers,
-            dead_workers: 0,
-        }
-    }
-}
+/// Chunk ids already durably written, shared between disk-writer workers and
+/// the reader thread (which needs it to answer completion-check requests).
+type ChunkLog = Arc<Mutex<HashSet<u64>>>;
+
+// =====================================================================
+// Public entry points
+// =====================================================================
 
 pub fn request(
     mut stream: TcpStream,
@@ -91,73 +76,58 @@ pub fn request(
     password: &str,
     file_uuid: &str,
     path_for_the_requested_file: &str,
-) -> std::io::Result<()> {
+) -> io::Result<()> {
     let path = Path::new(path_for_the_requested_file);
     let filename = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
 
-    let file_uuid = match Uuid::from_str(file_uuid) {
-        Ok(u) => u,
-        Err(e) => {
-            eprintln!("failed to get uuid from str");
-            return Err(Error::last_os_error());
-        }
-    };
+    let file_uuid = Uuid::from_str(file_uuid)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, format!("bad uuid: {e}")))?;
 
     stream.write_all(&first_message(5, &file_uuid, username, password))?;
 
-    let mut buf = [0u8; 100];
-    stream.read(&mut buf)?;
+    let (code, chunks_len) = read_handshake_response(&mut stream)?;
+    println!("code: {code:?}");
+    match code {
+        MSG_ACK_OK => {
+            let temp_path = format!("{TEMP_FOLDER_LOCATION}/{filename}");
+            {
+                let mut parts_write = parts.write().unwrap();
+                parts_write.acc.push(PartAcc {
+                    uuid: Uuid::new_v4(),
+                    temp_path: temp_path.clone(),
+                    real_path: path_for_the_requested_file.to_string(),
+                    server_uuid: file_uuid.to_string(),
+                });
+                let res = parts_write.save();
+                println!("parts_write: {res:?}");
+            }
 
-    let temp_path = format!("./temp/{:?}", filename);
+            receive_file(
+                stream,
+                &temp_path,
+                path_for_the_requested_file,
+                max_workers,
+                chunks_len,
+            )
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("{e:?}")))?;
 
-    match buf[0] {
-        20 => {
             let mut parts_write = parts.write().unwrap();
-            parts_write.acc.push(PartAcc {
-                uuid: Uuid::new_v4(),
-                temp_path: temp_path.clone(),
-                real_path: path_for_the_requested_file.to_string(),
-                server_uuid: file_uuid.to_string(),
-            });
-            let res = parts_write.save();
-            println!("parts_write: {res:?}");
+            if let Some(pos) = parts_write
+                .acc
+                .iter()
+                .position(|item| item.server_uuid == file_uuid.to_string())
+            {
+                parts_write.acc.remove(pos);
+            }
+            let _ = parts_write.save();
+            Ok(())
         }
-        48 => {
-            eprintln!("forbidden");
-            return Err(Error::last_os_error());
-        }
-        e => {
-            eprintln!("failed: {:?}", e);
-            return Err(Error::last_os_error());
-        }
+        48 => Err(io::Error::new(io::ErrorKind::PermissionDenied, "forbidden")),
+        other => Err(io::Error::new(
+            io::ErrorKind::Other,
+            format!("handshake failed with code {other}"),
+        )),
     }
-
-    let chunks_len = u32::from_be_bytes(buf[1..5].try_into().unwrap());
-    println!("chunks len: {:?}", chunks_len);
-
-    stream.write_all(&[20u8; 1]);
-
-    recieve(
-        stream,
-        &temp_path,
-        path_for_the_requested_file,
-        max_workers,
-        chunks_len as usize,
-    );
-
-    {
-        let mut parts = parts.write().unwrap();
-        if let Some(pos) = parts
-            .acc
-            .iter()
-            .position(|item| item.server_uuid == file_uuid.to_string())
-        {
-            parts.acc.remove(pos);
-        }
-        parts.save();
-    };
-
-    Ok(())
 }
 
 pub fn reinitialize(
@@ -167,255 +137,358 @@ pub fn reinitialize(
     acc_uuid: &str,
     username: &str,
     password: &str,
-) -> Result<(), Error> {
-    println!("{acc_uuid:?}");
+) -> io::Result<()> {
     let (real_path, temp_path, file_uuid) = {
-        let uuid = match Uuid::from_str(acc_uuid) {
-            Ok(u) => u,
-            Err(e) => {
-                eprintln!("invalid uuid: {e:?}");
-                return Err(Error::last_os_error());
-            }
-        };
-        println!("{uuid:?}");
+        let uuid = Uuid::from_str(acc_uuid).map_err(|e| {
+            io::Error::new(io::ErrorKind::InvalidInput, format!("invalid uuid: {e}"))
+        })?;
         let parts_read = parts.read().unwrap();
-        if parts_read.acc.is_empty() {
-            eprintln!("acc in parts.json is empty, therefor there is nothing to reinit");
-            return Err(Error::last_os_error());
-        }
-        let part = match parts_read.acc.iter().find(|p| p.uuid == uuid) {
-            Some(p) => p,
-            None => {
-                eprintln!("uuid not found");
-                return Err(Error::last_os_error());
-            }
-        };
-
-        match Uuid::from_str(&part.server_uuid) {
-            Ok(u) => (part.real_path.clone(), part.temp_path.clone(), u),
-            Err(e) => {
-                eprintln!("failed parsing string into uuid: {:?}", e);
-                return Err(Error::last_os_error());
-            }
-        }
+        let part = parts_read
+            .acc
+            .iter()
+            .find(|p| p.uuid == uuid)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "uuid not found"))?;
+        let server_uuid = Uuid::from_str(&part.server_uuid).map_err(|e| {
+            io::Error::new(io::ErrorKind::InvalidData, format!("bad server uuid: {e}"))
+        })?;
+        (part.real_path.clone(), part.temp_path.clone(), server_uuid)
     };
 
-    stream.write_all(&first_message(5, &file_uuid, username, password))?;
+    stream.write_all(&first_message(6, &file_uuid, username, password))?;
 
-    let mut buf = [0u8; 100];
-    stream.read(&mut buf)?;
-
-    match buf[0] {
-        20 => (),
-        48 => {
-            eprintln!("forbiden");
-            return Err(Error::last_os_error());
-        }
-        e => {
-            eprintln!("failed: {:?}", e);
-            return Err(Error::last_os_error());
+    let (code, chunks_len) = read_handshake_response(&mut stream)?;
+    match code {
+        MSG_ACK_OK => {}
+        48 => return Err(io::Error::new(io::ErrorKind::PermissionDenied, "forbidden")),
+        other => {
+            return Err(io::Error::new(
+                io::ErrorKind::Other,
+                format!("handshake failed with code {other}"),
+            ))
         }
     }
 
-    let chunks_len = u32::from_be_bytes(buf[1..5].try_into().unwrap());
-    println!("chunks len: {:?}", chunks_len);
-
-    let mut files: Vec<PathBuf> = Vec::new();
-
-    let temp_location = Path::new(TEMP_FOLDER_LOCATION);
-    let stor_location = Path::new(STORAGE_FOLDER_LOCATION);
-
-    if !temp_location.exists() {
-        create_dir_all(temp_location);
-        return Err(Error::other("temp location didnt exist"));
-    }
-
-    if !stor_location.exists() {
-        create_dir_all(stor_location);
-        return Err(Error::other("stor location didnt exist"));
-    }
-
-    find_temp_files(temp_location, &mut files);
+    ensure_dirs_exist()?;
 
     let existing_path_string = format!("{temp_path}.config");
     let existing_path = Path::new(&existing_path_string);
+    let contents = fs::read_to_string(existing_path)?;
+    let config_file: ConfigFile = serde_json::from_str(&contents)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("bad config: {e}")))?;
 
-    println!("path: {:?}", existing_path);
+    let file_name = existing_path
+        .file_stem()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "bad config filename"))?;
+    let temp_at = Path::new(TEMP_FOLDER_LOCATION).join(file_name);
 
-    let contents = fs::read_to_string(existing_path).unwrap();
-    let config_file: ConfigFile = serde_json::from_str(&contents).unwrap();
-
-    let file_name = existing_path.file_stem().unwrap();
-
-    let temp_at = temp_location.join(file_name);
-
-    let file = OpenOptions::new()
-        .write(true)
-        .create(true)
-        .open(Path::new(&temp_at))
-        .unwrap();
+    let file = OpenOptions::new().write(true).create(true).open(&temp_at)?;
 
     let transfered_file = Arc::new(TransferedFile {
         file_size_chunks: config_file.file_size_chunks,
         file: Arc::new(file),
-        temp_path: temp_at.to_path_buf(),
+        temp_path: temp_at,
         storage_path: Path::new(&real_path).to_path_buf(),
         config_path: Mutex::new(existing_path.to_path_buf()),
     });
 
-    stream.write_all(&response::TransferSuccess::Ok.respond(Vec::new()).as_slice());
-
-    // Reinitialized, initializing workers
-
-    let transfer = Arc::new(Mutex::new(Transfer::new(max_workers)));
-
-    {
-        let mut transf = transfer.lock().unwrap();
-        config_file.transfered_chunks.iter().for_each(|chunk_id| {
-            transf.chunk_log.insert(*chunk_id);
-        });
+    // chunks_len from the handshake should agree with what our own config recorded;
+    // if it doesn't, something is inconsistent between client and server bookkeeping.
+    if chunks_len != config_file.file_size_chunks {
+        eprintln!(
+            "warning: server reports {chunks_len} chunks but local config expects {}",
+            config_file.file_size_chunks
+        );
     }
 
-    // WORKERS
-    let handles = init_workers_reciever(max_workers, &transfer, &transfered_file);
+    let chunk_log: ChunkLog = Arc::new(Mutex::new(config_file.transfered_chunks.clone()));
 
-    //READER
-    println!("reader initialized");
-    let tran = Arc::clone(&transfer);
-    stream.set_nonblocking(true).unwrap();
+    run_transfer_loop(stream, &transfered_file, max_workers, chunk_log)
+        .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("{e:?}")))?;
 
-    init_stream_reader(&mut stream, &tran, &transfered_file);
+    finalize_transfer(&transfered_file)?;
 
-    println!("loop broken");
-    handles
-        .into_iter()
-        .for_each(|handle| handle.join().unwrap());
-
-    let mut ready_buf = [21u8; 1];
-    stream.write_all(&mut ready_buf).unwrap();
-
-    println!("sent {:?}", ready_buf);
-
-    println!("awaiting hash confirmation");
-
-    execute_final_completion_check(&mut stream, &transfered_file);
-
-    std::fs::copy(&transfered_file.temp_path, &transfered_file.storage_path).unwrap();
-    std::fs::remove_file(&transfered_file.temp_path).unwrap();
-    let cfg_path = transfered_file.config_path.lock().unwrap().clone();
-    std::fs::remove_file(&cfg_path).unwrap();
+    let mut parts_write = parts.write().unwrap();
+    if let Some(pos) = parts_write
+        .acc
+        .iter()
+        .position(|item| item.server_uuid == file_uuid.to_string())
     {
-        let mut parts = parts.write().unwrap();
-        if let Some(pos) = parts
-            .acc
-            .iter()
-            .position(|item| item.server_uuid == file_uuid.to_string())
-        {
-            parts.acc.remove(pos);
-        }
-        parts.save();
-    };
+        parts_write.acc.remove(pos);
+    }
+    let _ = parts_write.save();
+
     Ok(())
 }
 
-fn find_temp_files(dir: &Path, results: &mut Vec<PathBuf>) -> std::io::Result<()> {
-    for entry in read_dir(dir)? {
-        let entry = entry?;
-        let path = entry.path();
-
-        if path.is_dir() {
-            find_temp_files(&path, results)?;
-        } else if path.extension().map_or(false, |ext| ext == "config") {
-            results.push(path);
-        }
-    }
-    Ok(())
-}
-
-pub fn recieve(
-    mut stream: TcpStream,
+fn receive_file(
+    stream: TcpStream,
     temp_path: &str,
     real_path: &str,
     max_workers: usize,
-    file_size_chunks: usize,
-) {
-    let transfer = Arc::new(Mutex::new(Transfer::new(max_workers)));
+    file_size_chunks: u64,
+) -> Result<(), ErrorTransfer> {
+    let transfered_file = init_transfer(temp_path, real_path, file_size_chunks)?;
+    setup_config(&transfered_file).map_err(|_| ErrorTransfer::InternalServerError)?;
 
-    let file = Some(init_transfer(temp_path, real_path, file_size_chunks).unwrap());
-    let mut buf = [0; 32];
-    buf[0] = TransferSuccess::Ok.get_code();
-    for (index, byte) in TransferSuccess::Ok.get_message().into_iter().enumerate() {
-        buf[index + 1] = byte
+    let transfered_file = Arc::new(transfered_file);
+    let chunk_log: ChunkLog = Arc::new(Mutex::new(HashSet::new()));
+
+    run_transfer_loop(stream, &transfered_file, max_workers, chunk_log)?;
+    finalize_transfer(&transfered_file).map_err(|_| ErrorTransfer::InternalServerError)?;
+    Ok(())
+}
+
+// =====================================================================
+// Core transfer loop, shared by fresh transfers and reinit
+// =====================================================================
+
+fn run_transfer_loop(
+    mut stream: TcpStream,
+    transfered_file: &Arc<TransferedFile>,
+    max_workers: usize,
+    chunk_log: ChunkLog,
+) -> Result<(), ErrorTransfer> {
+    println!("started run transfer loop");
+    let writer_stream = stream
+        .try_clone()
+        .map_err(|_| ErrorTransfer::InternalServerError)?;
+    let (tx, writer_handle) = init_writer(writer_stream);
+
+    let (job_tx, job_rx): (SyncSender<ChunkJob>, Receiver<ChunkJob>) =
+        sync_channel(MAX_IN_FLIGHT_JOBS);
+    let job_rx = Arc::new(Mutex::new(job_rx));
+
+    let mut worker_handles = Vec::new();
+    for _ in 0..max_workers.max(1) {
+        let job_rx = job_rx.clone();
+        let tx = tx.clone();
+        let chunk_log = chunk_log.clone();
+        let file = transfered_file.clone();
+        worker_handles.push(thread::spawn(move || {
+            disk_writer_worker(job_rx, tx, chunk_log, file)
+        }));
     }
-    let _ = stream.write_all(&buf);
-    let lock_file = Arc::new(file.unwrap());
+    // drop our own senders so the channel closes once the reader loop stops feeding it
+    drop(job_tx.clone());
 
-    setup_config(&lock_file);
+    // --- main reader loop: drives the whole exchange sequentially ---
+    let outcome = reader_loop(&mut stream, &job_tx, &tx, &chunk_log, transfered_file);
+    drop(job_tx); // let workers drain remaining jobs, then exit
+    drop(tx); // let the writer thread flush and exit once workers are done acking
 
-    // WORKERS
-    let handles = init_workers_reciever(max_workers, &transfer, &lock_file);
+    for h in worker_handles {
+        let _ = h.join();
+    }
+    let _ = writer_handle.join();
 
-    //READER
-    println!("reader initialized");
-    let tran = Arc::clone(&transfer);
-    stream.set_nonblocking(true).unwrap();
+    let outcome = outcome?;
 
-    init_stream_reader(&mut stream, &tran, &lock_file);
+    // --- hash-check phase: reader loop already exited, socket read/write is ours alone now ---
+    let local_hash =
+        hash_file(&transfered_file.temp_path).map_err(|_| ErrorTransfer::InternalServerError)?;
+    let mut hash_msg = Vec::with_capacity(33);
+    hash_msg.push(MSG_HASH_RESPONSE);
+    hash_msg.extend_from_slice(local_hash.as_bytes());
+    stream
+        .write_all(&hash_msg)
+        .map_err(|_| ErrorTransfer::InternalServerError)?;
 
-    println!("loop broken");
-    handles
-        .into_iter()
-        .for_each(|handle| handle.join().unwrap());
+    let mut verdict = [0u8; 1];
+    stream
+        .read_exact(&mut verdict)
+        .map_err(|_| ErrorTransfer::InternalServerError)?;
+    match verdict[0] {
+        MSG_ACK_OK => {}
+        MSG_ACK_FAIL => return Err(ErrorTransfer::HashesDoNotMatch),
+        other => {
+            eprintln!("unexpected final verdict byte: {other}");
+            return Err(ErrorTransfer::InternalServerError);
+        }
+    }
 
-    let mut ready_buf = [21u8; 1];
-    stream.write_all(&mut ready_buf).unwrap();
+    let _ = outcome;
+    Ok(())
+}
 
-    println!("sent {:?}", ready_buf);
+/// Reads messages off the wire until a hash-check request (`4`) arrives.
+/// Chunk data (`2`) is handed off to worker threads; completion-check
+/// requests (`3`) are answered directly against the shared chunk log.
+fn reader_loop(
+    stream: &mut TcpStream,
+    job_tx: &SyncSender<ChunkJob>,
+    resp_tx: &SyncSender<Vec<u8>>,
+    chunk_log: &ChunkLog,
+    transfered_file: &Arc<TransferedFile>,
+) -> Result<(), ErrorTransfer> {
+    loop {
+        let mut msg_type = [0u8; 1];
+        stream
+            .read_exact(&mut msg_type)
+            .map_err(|_| ErrorTransfer::InternalServerError)?;
 
-    println!("awaiting hash confirmation");
+        match msg_type[0] {
+            MSG_CHUNK => {
+                let mut header = [0u8; OVERHEAD - 1]; // chunk_id (8) + payload_len (8)
+                stream
+                    .read_exact(&mut header)
+                    .map_err(|_| ErrorTransfer::InternalServerError)?;
+                let chunk_id = u64::from_be_bytes(header[0..8].try_into().unwrap());
+                let payload_len = u64::from_be_bytes(header[8..16].try_into().unwrap()) as usize;
 
-    execute_final_completion_check(&mut stream, &lock_file);
+                if payload_len > CHUNK_SIZE - OVERHEAD {
+                    eprintln!("peer sent implausible payload_len {payload_len}, aborting");
+                    return Err(ErrorTransfer::InternalServerError);
+                }
 
-    std::fs::copy(&lock_file.temp_path, &lock_file.storage_path).unwrap();
-    std::fs::remove_file(&lock_file.temp_path).unwrap();
-    let cfg_path = lock_file.config_path.lock().unwrap().clone();
-    std::fs::remove_file(&cfg_path).unwrap();
+                let mut payload = vec![0u8; payload_len];
+                stream
+                    .read_exact(&mut payload)
+                    .map_err(|_| ErrorTransfer::InternalServerError)?;
+
+                // backpressure: this blocks if MAX_IN_FLIGHT_JOBS workers are all busy,
+                // which naturally throttles how fast we read off the socket
+                if job_tx.send(ChunkJob { chunk_id, payload }).is_err() {
+                    // worker side is gone; nothing more we can do
+                    return Err(ErrorTransfer::InternalServerError);
+                }
+            }
+            MSG_COMPLETION_REQUEST => {
+                let response =
+                    build_completion_response(chunk_log, transfered_file.file_size_chunks);
+                println!("response: {response:?}");
+                if resp_tx.send(response).is_err() {
+                    return Err(ErrorTransfer::InternalServerError);
+                }
+            }
+            MSG_HASH_REQUEST => {
+                return Ok(()); // hand control back to run_transfer_loop for the hash exchange
+            }
+            other => {
+                eprintln!("reader: unexpected message type {other}");
+                // don't kill the transfer over one stray/unknown byte; keep going
+            }
+        }
+    }
+}
+
+fn build_completion_response(chunk_log: &ChunkLog, file_size_chunks: u64) -> Vec<u8> {
+    let present = chunk_log.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    let missing: Vec<u64> = (0..file_size_chunks)
+        .filter(|id| !present.contains(id))
+        .collect();
+
+    let mut buf = Vec::with_capacity(9 + missing.len() * 8);
+    buf.push(MSG_COMPLETION_RESPONSE);
+    buf.extend_from_slice(&(missing.len() as u64).to_be_bytes());
+    println!("missing.len(): {}", missing.len());
+    println!("missing.len(): {:?}", (missing.len() as u64).to_be_bytes());
+    println!("buf: {:?}", buf);
+
+    for id in missing {
+        buf.extend_from_slice(&id.to_be_bytes());
+    }
+    buf
+}
+
+fn disk_writer_worker(
+    job_rx: Arc<Mutex<Receiver<ChunkJob>>>,
+    tx: SyncSender<Vec<u8>>,
+    chunk_log: ChunkLog,
+    transfered_file: Arc<TransferedFile>,
+) {
+    loop {
+        let job = {
+            let rx = job_rx.lock().unwrap_or_else(|e| e.into_inner());
+            rx.recv()
+        };
+        let Ok(job) = job else { break }; // channel closed: no more work, ever
+
+        let offset = job.chunk_id * (CHUNK_SIZE - OVERHEAD) as u64;
+        let write_result = transfered_file.file.write_at(&job.payload, offset);
+
+        let ack = match write_result {
+            Ok(_) => {
+                let mut log = chunk_log.lock().unwrap_or_else(|e| e.into_inner());
+                log.insert(job.chunk_id);
+                let count = log.len();
+                drop(log);
+                if count % 32 == 0 {
+                    let _ = update_config(&transfered_file.config_path, &chunk_log);
+                }
+                build_ack(MSG_ACK_OK, job.chunk_id)
+            }
+            Err(e) => {
+                eprintln!("failed to write chunk {}: {e:?}", job.chunk_id);
+                build_ack(MSG_ACK_FAIL, job.chunk_id)
+            }
+        };
+
+        if tx.send(ack).is_err() {
+            break; // writer/connection gone
+        }
+    }
+}
+
+fn build_ack(code: u8, chunk_id: u64) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(9);
+    buf.push(code);
+    buf.extend_from_slice(&chunk_id.to_be_bytes());
+    buf
+}
+
+fn init_writer(mut stream: TcpStream) -> (SyncSender<Vec<u8>>, JoinHandle<()>) {
+    println!("init writer");
+    let (tx, rx) = sync_channel::<Vec<u8>>(MAX_IN_FLIGHT_JOBS);
+    let handle = thread::spawn(move || {
+        for bytes in rx {
+            if let Err(e) = stream.write_all(&bytes) {
+                eprintln!("writer: write failed: {e:?}");
+                break;
+            } else {
+                println!("bytes written: {bytes:?}")
+            }
+        }
+    });
+    (tx, handle)
+}
+
+// =====================================================================
+// Setup / teardown helpers
+// =====================================================================
+
+fn ensure_dirs_exist() -> io::Result<()> {
+    let temp_location = Path::new(TEMP_FOLDER_LOCATION);
+    let stor_location = Path::new(STORAGE_FOLDER_LOCATION);
+    if !temp_location.exists() {
+        create_dir_all(temp_location)?;
+    }
+    if !stor_location.exists() {
+        create_dir_all(stor_location)?;
+    }
+    Ok(())
 }
 
 fn init_transfer(
     temp_path: &str,
     real_path: &str,
-    file_size_chunks: usize,
+    file_size_chunks: u64,
 ) -> Result<TransferedFile, ErrorTransfer> {
-    let temp_location = Path::new(TEMP_FOLDER_LOCATION);
-    let stor_location = Path::new(STORAGE_FOLDER_LOCATION);
+    ensure_dirs_exist().map_err(|_| ErrorTransfer::InternalServerError)?;
 
-    if !temp_location.exists() {
-        create_dir_all(temp_location);
-    }
-
-    if !stor_location.exists() {
-        create_dir_all(stor_location);
-    }
-
-    let config_file_path = format!("{}.config", temp_path);
-
-    let path = Path::new(&temp_path);
-    let storage_path = Path::new(&real_path);
+    let config_file_path = format!("{temp_path}.config");
+    let path = Path::new(temp_path);
+    let storage_path = Path::new(real_path);
     let config_path = Path::new(&config_file_path);
 
     if path.exists() || storage_path.exists() || config_path.exists() {
         return Err(ErrorTransfer::ThisFileExists);
     }
 
-    println!("path: {:?}", path);
-    let file = match File::create(path) {
-        Ok(val) => val,
-        Err(y) => {
-            eprintln!("file creation failed: {:?}", y);
-            return Err(ErrorTransfer::InternalServerError);
-        }
-    };
+    let file = File::create(path).map_err(|e| {
+        eprintln!("file creation failed: {e:?}");
+        ErrorTransfer::InternalServerError
+    })?;
+
     Ok(TransferedFile {
         file_size_chunks,
         file: Arc::new(file),
@@ -425,22 +498,16 @@ fn init_transfer(
     })
 }
 
-fn setup_config(lock_file: &Arc<TransferedFile>) -> Result<(), Error> {
-    let config_path = {
-        let lock = lock_file.config_path.lock().unwrap();
-        lock.clone()
-    };
+fn setup_config(transfered_file: &TransferedFile) -> io::Result<()> {
+    let config_path = transfered_file.config_path.lock().unwrap().clone();
     let mut config_file = File::create(config_path)?;
 
     let config = ConfigFile {
-        last_changed_at: time::SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos() as u64,
-        file_size_chunks: lock_file.file_size_chunks,
+        last_changed_at: now_nanos(),
+        file_size_chunks: transfered_file.file_size_chunks,
         transfered_chunks: HashSet::new(),
-        is_public: false,  //is_public is todo!()
-        owner: Vec::new(), //owner is todo!()
+        is_public: false,
+        owner: Vec::new(),
     };
 
     let json = serde_json::to_string_pretty(&config)?;
@@ -448,294 +515,70 @@ fn setup_config(lock_file: &Arc<TransferedFile>) -> Result<(), Error> {
     Ok(())
 }
 
-fn init_workers_reciever(
-    max_workers: usize,
-    transfer: &Arc<Mutex<Transfer>>,
-    lock_file: &Arc<TransferedFile>,
-) -> Vec<JoinHandle<()>> {
-    let mut handles = Vec::new();
-    for i in 0..max_workers {
-        println!("worker #{} initialized", i);
-        let transfer_clone = Arc::clone(transfer);
-        let file_clone = Arc::clone(lock_file);
-        handles.push(thread::spawn(move || {
-            let transf = transfer_clone;
-            let fil = file_clone;
-            loop {
-                let (chunk, should_die): (Option<Vec<u8>>, bool) = {
-                    let mut lock = transf.lock().unwrap();
-                    if lock.chunks.len() > 0 {
-                        (Some(lock.chunks.pop().unwrap().to_vec()), false)
-                    } else if lock.should_die {
-                        (None, true)
-                    } else {
-                        (None, false)
-                    }
-                };
-                if let Some(c) = chunk {
-                    let resp = recieve_chunk(c, &fil);
-                    println!("response from receive chunk: {:?}", resp);
-                    {
-                        let resp = match resp {
-                            Ok(id) => {
-                                let response =
-                                    TransferSuccess::Ok.respond((id as u64).to_be_bytes().to_vec());
-                                let mut arr = [0u8; 16];
-                                arr[8..].copy_from_slice(&response[1..]);
-                                arr[0] = response[0];
-                                println!("{:?}", response);
-                                let log_len = {
-                                    let mut lock = transf.lock().unwrap();
-                                    lock.chunk_log.insert(id);
-                                    lock.chunk_log.len()
-                                };
-                                if log_len % 10 == 8 {
-                                    let res = update_config(&fil.config_path, &transf);
-                                    println!("response_: {:?}", res);
-                                } else {
-                                    println!("log_len: {log_len}");
-                                }
-
-                                arr
-                            }
-                            Err(y) => {
-                                let response = y.respond(vec![0u8]);
-                                let mut arr = [0u8; 16];
-                                let len = response.len().min(16);
-                                arr[1..len].copy_from_slice(&response[1..len]);
-                                arr[0] = response[0];
-                                arr
-                            }
-                        };
-                        let mut lock = transf.lock().unwrap();
-                        lock.responses.push(resp);
-                    }
-                } else if should_die {
-                    let mut lock = transf.lock().unwrap();
-                    lock.dead_workers += 1;
-                    println!("{i} died");
-                    break;
-                } else {
-                    thread::sleep(time::Duration::from_millis(10));
-                }
-            }
-        }));
-    }
-    handles
-}
-
-fn recieve_chunk(contents: Vec<u8>, file: &Arc<TransferedFile>) -> Result<usize, ErrorTransfer> {
-    println!("contents: {:?}", &contents[0..20]);
-    let mut id_b = [0; 8];
-    for i in 0..8 {
-        id_b[i] = contents[i + 1];
-    }
-    let chunk_id = u64::from_be_bytes(id_b);
-    let mut size_b = [0; 2];
-    size_b[0] = contents[9];
-    size_b[1] = contents[10];
-    let chunk_size = u16::from_be_bytes(size_b);
-    println!("chunk_size: {}", chunk_size);
-    let mut trimed: Vec<u8> = Vec::new();
-    for i in 0..chunk_size {
-        trimed.push(contents[(i + 11) as usize])
-    }
-    println!("chunk_id: {chunk_id}");
-    let location = chunk_id * (CHUNK_SIZE - OVERHEAD) as u64;
-    match file.file.write_at(&trimed[..], location) {
-        Ok(_) => Ok(chunk_id as usize),
-        Err(y) => {
-            eprintln!("{y}");
-            Err(ErrorTransfer::InternalServerError)
-        }
-    }
-}
-
-fn init_stream_reader(
-    stream: &mut TcpStream,
-    tran: &Arc<Mutex<Transfer>>,
-    lock_file: &Arc<TransferedFile>,
-) {
-    loop {
-        let mut header = [0u8; 1];
-        match stream.read_exact(&mut header) {
-            Ok(_) => {
-                if header[0] == 2 {
-                    let mut header_buf = [0u8; 10];
-                    match stream.read_exact(&mut header_buf) {
-                        Ok(_) => {}
-                        Err(y) => {
-                            eprintln!("{:?}", y);
-                            continue;
-                        }
-                    };
-                    let size = u16::from_be_bytes(header_buf[8..10].try_into().unwrap());
-                    let mut body_buf = vec![0u8; size as usize];
-                    println!("size: {size}");
-                    match stream.read_exact(&mut body_buf) {
-                        Ok(_) => {}
-                        Err(y) => {
-                            eprintln!("{:?}", y);
-                            continue;
-                        }
-                    };
-                    let mut reconstructed = [0u8; CHUNK_SIZE];
-                    reconstructed[0] = 2;
-                    reconstructed[1..11].copy_from_slice(&mut header_buf);
-                    reconstructed[11..11 + size as usize].copy_from_slice(&mut body_buf);
-                    let transfered = {
-                        let mut transf = tran.lock().unwrap();
-                        if transf.chunks.len() < MAX_STORED {
-                            transf.chunks.push(reconstructed);
-                            true
-                        } else {
-                            false
-                        }
-                    };
-                    if !transfered {
-                        let _ = stream.write_all(&ErrorTransfer::TooFast.respond(vec![0u8; 15]));
-                    }
-                } else if header[0] == 3 {
-                    println!("3 came");
-                    let mut lock = tran.lock().unwrap();
-
-                    let chunks_number = { lock_file.file_size_chunks };
-                    if lock.chunk_log.len() == chunks_number {
-                        lock.should_die = true;
-                        let mut buf = vec![0u8; 9];
-                        buf[0] = 23u8.to_be_bytes()[0];
-                        println!("buf: {:?}", buf);
-                        stream.write_all(&buf).unwrap();
-                    } else {
-                        let present: HashSet<usize> = lock.chunk_log.clone();
-                        let missing: Vec<usize> = (0..chunks_number)
-                            .filter(|x| !present.contains(x))
-                            .collect();
-                        let mut buf = Vec::new();
-                        buf.extend_from_slice(&mut vec![23u8]);
-                        let size_bytes = (missing.len() as u64).to_be_bytes();
-                        buf.extend_from_slice(&size_bytes);
-                        missing.iter().for_each(|miss| {
-                            buf.extend_from_slice(&(*miss as u64).to_be_bytes());
-                        });
-                        match stream.write_all(&buf) {
-                            Ok(_) => println!("write ok"),
-                            Err(e) => println!("write error: {e}"),
-                        }
-                    }
-                } else {
-                    println!("44 header: {} not found", header[0]);
-                    let _ = stream.write_all(&ErrorTransfer::NotFound.respond(vec![0u8; 17]));
-                }
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
-            Err(e) => {
-                eprintln!("read error: {e}");
-                break;
-            }
-        }
-        {
-            let mut lock = tran.lock().unwrap();
-            while !lock.responses.is_empty() {
-                let response_to_send = lock.responses.pop().unwrap();
-                let res = stream.write_all(&response_to_send);
-                println!("{:?}, responses in queue: {:?}", res, response_to_send);
-                thread::sleep(Duration::from_millis(5));
-            }
-            if lock.dead_workers == lock.max_workers {
-                break;
-            }
-        };
-    }
-}
-
-fn execute_final_completion_check(stream: &mut TcpStream, lock_file: &Arc<TransferedFile>) {
-    {
-        loop {
-            loop {
-                let mut header_buf = [0u8; 1];
-                match stream.read_exact(&mut header_buf) {
-                    Ok(_) => match header_buf[0] {
-                        4 => {
-                            break;
-                        }
-                        0 => {}
-                        val => {
-                            println!("44 conf header: {} not found", val);
-                            let _ =
-                                stream.write_all(&ErrorTransfer::NotFound.respond(vec![0u8; 17]));
-                        }
-                    },
-                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
-                    Err(_) => {
-                        println!("44 header: {} not found", header_buf[0]);
-                        let _ = stream.write_all(&ErrorTransfer::NotFound.respond(vec![0u8; 17]));
-                    }
-                };
-            }
-            let mut hash_buf = [0u8; 32];
-            stream.read_exact(&mut hash_buf).unwrap();
-            let server_hash = hash_file(lock_file.temp_path.clone()).unwrap();
-            let client_hash: Hash = hash_buf.try_into().unwrap();
-            if server_hash == client_hash {
-                println!("hashes match");
-                let res = stream.write_all(&{
-                    let mut resp = vec![0u8; 18];
-                    resp[0] = 24;
-                    resp
-                });
-                println!("result: {:?}", res);
-                break;
-            } else {
-                println!("hashes do not match");
-                let _ = stream.write_all(&ErrorTransfer::HashesDoNotMatch.respond(vec![0u8; 17]));
-            }
-        }
-    }
-    println!("file transfer complete");
-}
-
-fn update_config(path: &Mutex<PathBuf>, transf: &Arc<Mutex<Transfer>>) -> Result<(), Error> {
-    let path = path.lock().unwrap();
-
-    println!("config path: {:?}", path);
-
-    let mut file = OpenOptions::new().read(true).write(true).open(&*path)?;
+fn update_config(config_path: &Mutex<PathBuf>, chunk_log: &ChunkLog) -> io::Result<()> {
+    let path = config_path.lock().unwrap().clone();
+    let mut file = OpenOptions::new().read(true).write(true).open(&path)?;
 
     let reader = BufReader::new(&file);
     let mut config: ConfigFile = serde_json::from_reader(reader)?;
 
-    // Convert Vec to HashSet for comparison
-    let existing: HashSet<usize> = config.transfered_chunks.iter().copied().collect();
-
-    let lock = transf.lock().unwrap();
-
-    if existing == lock.chunk_log {
+    let current = chunk_log.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    if config.transfered_chunks == current {
         return Ok(());
     }
 
-    config.last_changed_at = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos() as u64;
+    config.last_changed_at = now_nanos();
+    config.transfered_chunks = current;
 
-    // Merge new chunks in
-    config.transfered_chunks = existing.union(&lock.chunk_log).copied().collect();
-
-    // Overwrite from the start, truncate leftover bytes
     let json = serde_json::to_string_pretty(&config)?;
     file.seek(SeekFrom::Start(0))?;
     file.set_len(0)?;
     file.write_all(json.as_bytes())?;
-
     Ok(())
 }
 
-fn hash_file(file: PathBuf) -> io::Result<Hash> {
+fn finalize_transfer(transfered_file: &Arc<TransferedFile>) -> io::Result<()> {
+    fs::copy(&transfered_file.temp_path, &transfered_file.storage_path)?;
+    fs::remove_file(&transfered_file.temp_path)?;
+    let cfg_path = transfered_file.config_path.lock().unwrap().clone();
+    fs::remove_file(&cfg_path)?;
+    Ok(())
+}
+
+fn find_temp_files(dir: &Path, results: &mut Vec<PathBuf>) -> io::Result<()> {
+    for entry in read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.is_dir() {
+            find_temp_files(&path, results)?;
+        } else if path.extension().map_or(false, |ext| ext == "config") {
+            results.push(path);
+        }
+    }
+    Ok(())
+}
+
+/// Reads the 9-byte handshake ack: `[code: u8][chunks_len: u64]`.
+/// `chunks_len` is only meaningful when `code == MSG_ACK_OK`.
+fn read_handshake_response(stream: &mut TcpStream) -> io::Result<(u8, u64)> {
+    let mut buf = [0u8; 9];
+    stream.read_exact(&mut buf)?;
+    let code = buf[0];
+    let chunks_len = u64::from_be_bytes(buf[1..9].try_into().unwrap());
+    Ok((code, chunks_len))
+}
+
+fn now_nanos() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos() as u64
+}
+
+fn hash_file(path: &Path) -> io::Result<Hash> {
     let mut hasher = Hasher::new();
     let mut buf = [0u8; 65536];
-    let mut file = File::open(file).unwrap();
-
+    let mut file = File::open(path)?;
     loop {
         let n = file.read(&mut buf)?;
         if n == 0 {
@@ -743,6 +586,5 @@ fn hash_file(file: PathBuf) -> io::Result<Hash> {
         }
         hasher.update(&buf[..n]);
     }
-
     Ok(hasher.finalize())
 }
