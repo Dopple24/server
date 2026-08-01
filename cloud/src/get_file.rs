@@ -237,7 +237,7 @@ pub fn send_file(
         }
     }
     println!("SENT 4");
-    let hash_here = match hash_file(arc_file.clone()) {
+    let hash_here = match hash_file(arc_file) {
         Ok(h) => h,
         Err(e) => {
             eprintln!("failed to hash a file: {e:?}");

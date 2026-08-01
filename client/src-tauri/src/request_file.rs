@@ -106,7 +106,6 @@ pub fn request(
                     server_uuid: file_uuid.to_string(),
                 });
                 let res = parts_write.save();
-                println!("parts_write: {res:?}");
             }
 
             receive_file(

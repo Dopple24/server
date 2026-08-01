@@ -224,13 +224,17 @@ async fn download(
     password: String,
     file_uuid: String,
     frontend_uuid: String,
+    file_name: String,
     parts: State<'_, Arc<RwLock<Parts>>>,
     app: tauri::AppHandle,
 ) -> Result<(), String> {
     let (tx, rx) = mpsc::channel();
-    app.dialog().file().save_file(move |file_path| {
-        let _ = tx.send(file_path.map(|p| p.to_string()));
-    });
+    app.dialog()
+        .file()
+        .set_file_name(file_name)
+        .save_file(move |file_path| {
+            let _ = tx.send(file_path.map(|p| p.to_string()));
+        });
     let path = tauri::async_runtime::spawn_blocking(move || rx.recv())
         .await
         .map_err(|e| e.to_string())?
@@ -239,6 +243,7 @@ async fn download(
     println!("download called");
     let stream = TcpStream::connect(SOCKET).map_err(|e| e.to_string())?;
     println!("connected");
+
     match request_file::request(
         stream,
         10,

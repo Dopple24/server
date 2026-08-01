@@ -91,18 +91,18 @@ async function upload() {
   const transferId = crypto.randomUUID();
   addTransferRow(transferId);
   try {
-    const file_name = await invoke("upload", {
+    await invoke("upload", {
       username,
       password,
       folderUuid: currentFolderUuid(),
       frontendUuid: transferId,
     });
-    updateFileName(transferId, file_name);
     updateTransferProgress(transferId, 100); // safety-net in case the last progress event was missed
+    showNotice("Upload complete", "success");
   } catch (err) {
     showError(err);
+    showNotice(`Upload failed ${err}`, "error");
   } finally {
-    showNotice("Upload complete", "success");
     removeTransferRow(transferId);
     fetchMap();
     loadPendingTransfers();
@@ -111,30 +111,31 @@ async function upload() {
 
 async function uploadReinit(uuid) {
   try {
-    const file_name = await invoke("upload_reinit", {
+    await invoke("upload_reinit", {
       username,
       password,
       sendUuid: uuid,
       frontendUuid: uuid,
     });
     updateTransferProgress(uuid, 100); // safety-net, same reasoning as above
+    showNotice("Upload complete", "success");
   } catch (err) {
     showError(err);
+    showNotice(`Upload failed ${err}`, "error");
   } finally {
-    showNotice("Upload complete", "success");
     removeTransferRow(uuid);
     fetchMap();
     loadPendingTransfers();
   }
 }
 
-async function download(uuid) {
+async function download(uuid, fileName) {
     const transferId = crypto.randomUUID();
     addTransferRow(transferId);
-    runDownload(transferId, uuid, false);
+    runDownload(transferId, uuid, false, fileName);
 }
 
-async function runDownload(transferId, uuid, isRetry) {
+async function runDownload(transferId, uuid, isRetry, fileName) {
   console.log(`transfer id ${transferId}`);
   const unlisten = await listen('transfer-progress', (event) => {
     if (event.payload.transfer_id === transferId) {
@@ -146,15 +147,16 @@ async function runDownload(transferId, uuid, isRetry) {
     if (isRetry) {
       await invoke("download_reinit", { username, password, accUuid: uuid, frontendUuid: transferId });
     } else {
-      await invoke("download", { username, password, fileUuid: uuid, frontendUuid: transferId });
+      await invoke("download", { username, password, fileUuid: uuid, frontendUuid: transferId, fileName });
     }
     setTransferSuccess(transferId);
+    showNotice("Download complete", "success");
   } catch (err) {
     const message = err?.toString?.() ?? String(err);
     setTransferError(transferId, message, () => runDownload(transferId, uuid, true));
+    showNotice(`Upload failed ${err}`, "error");
   } finally {
     unlisten();
-    showNotice("Download complete", "success");
     removeTransferRow(transferId);
     loadPendingTransfers();
   }
@@ -269,7 +271,7 @@ function buildFileRow(file) {
     download_btn.textContent = "Download";
     download_btn.addEventListener("click", (e) => {
         e.stopPropagation();
-        download(file.uuid);
+        download(file.uuid, file.name);
     });
     row.appendChild(download_btn);
 
@@ -575,33 +577,39 @@ function setTransferError(id, message, onRetry) {
     }
     errorLine.textContent = message;
 
-    let retryBtn = row.querySelector(".retry-btn");
-    if (!retryBtn) {
-        retryBtn = document.createElement("button");
-        retryBtn.className = "retry-btn";
-        retryBtn.textContent = "Retry";
-        row.appendChild(retryBtn);
-    }
+  let reinitOptions = row.querySelector(".reinit-options");
+  let retryBtn = row.querySelector(".retry-btn");
+  let cancelBtn = row.querySelector(".cancel-btn");
+
+  if (!reinitOptions) {
+    reinitOptions = document.createElement("div");
+    reinitOptions.className = "reinit-options";
+    row.appendChild(reinitOptions);
+
+    retryBtn = document.createElement("button");
+    retryBtn.className = "retry-btn";
+    retryBtn.textContent = "Retry";
+    reinitOptions.appendChild(retryBtn);
+
+    cancelBtn = document.createElement("button");
+    cancelBtn.className = "cancel-btn";
+    cancelBtn.textContent = "X";
+    reinitOptions.appendChild(cancelBtn);
+  }
     retryBtn.onclick = () => {
-        row.classList.remove("transfer-error");
-        errorLine.remove();
+    row.classList.remove("transfer-error");
+      errorLine.remove();
       retryBtn.remove();
       cancelBtn.remove();
-        row.querySelector(".file-percent").textContent = "0%";
-        onRetry();
-    };
+      reinitOptions.remove();
+    row.querySelector(".file-percent").textContent = "0%";
+    onRetry();
+  };
 
-    let cancelBtn = row.querySelector(".cancel-btn");
-    if (!cancelBtn) {
-        cancelBtn = document.createElement("button");
-        cancelBtn.className = "cancel-btn";
-        cancelBtn.textContent = "X";
-        row.appendChild(cancelBtn);
-    }
-  cancelBtn.onclick = () => {
+    cancelBtn.onclick = () => {
     row.remove();
-      remove_part(id)
-    };
+    remove_part(id)
+  };
 }
 
 async function remove_part(uuid) {
@@ -622,7 +630,7 @@ async function remove_part(uuid) {
     console.log("remove_part: done");
   } catch (err) {
     console.error("remove_part: failed for uuid =", uuid, "error =", err);
-    showNotice("failed to remove", "error");
+    showNotice(`failed to remove: ${err}`, "error");
   }
 }
 
@@ -635,7 +643,11 @@ function setTransferSuccess(id) {
 }
 
 async function loadPendingTransfers() {
-    try {
+  try {
+    let transferRows = document.querySelectorAll(".transfer-row");
+    transferRows.forEach(row => {
+      row.remove();
+    });
       const parts = await invoke("request_parts");
       console.log(parts);
 
