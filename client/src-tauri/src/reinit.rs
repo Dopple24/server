@@ -1,23 +1,18 @@
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::HashMap,
     fs::{File, OpenOptions},
     io::{Error, Read, Write},
     net::TcpStream,
-    os::unix::fs::FileExt,
     path::Path,
-    println,
     str::FromStr,
-    sync::{Arc, Mutex, RwLock},
-    thread,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    sync::{Arc, RwLock},
 };
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, State};
 use uuid::Uuid;
 
-use crate::{
-    app::{hash_file, send_chunk, CHUNK_SIZE, MAX_THREADS, NEW_PARTS_PATH, OVERHEAD, PARTS_PATH},
-    request_file::ProgressPayload,
+use crate::app::{
+    get_chunks_len, get_file_size, request_missing_chunks, run_send_loop, CHUNK_SIZE,
+    NEW_PARTS_PATH, PARTS_PATH,
 };
 
 #[derive(Deserialize, Serialize, Debug)]
@@ -48,48 +43,43 @@ pub struct PartAcc {
 
 impl Parts {
     pub fn save(&self) -> Result<(), PartsError> {
-        let mut new_database_file = match OpenOptions::new()
+        let mut new_database_file = OpenOptions::new()
             .create(true)
             .write(true)
             .truncate(true)
             .open(Path::new(NEW_PARTS_PATH))
-        {
-            Ok(fil) => fil,
-            Err(e) => {
-                eprint!("error opening database file: {:?}", e);
-                return Err(PartsError::FailedToSave);
-            }
-        };
-        let json_bytes = match serde_json::to_string_pretty(self) {
-            Ok(json) => json.into_bytes(),
-            Err(e) => {
-                eprintln!("invalid json: {:?}", e);
-                return Err(PartsError::FailedToSave);
-            }
-        };
-        match new_database_file.write_all(&json_bytes) {
-            Ok(_) => (),
-            Err(e) => {
-                eprintln!("failed to write into a file: {:?}", e);
-                return Err(PartsError::FailedToSave);
-            }
-        };
+            .map_err(|e| {
+                eprintln!("error opening database file: {e:?}");
+                PartsError::FailedToSave
+            })?;
 
-        if let Err(e) = new_database_file.sync_all() {
-            eprintln!("failed to flush database file to disk: {:?}", e);
-            return Err(PartsError::FailedToSave);
-        }
+        let json_bytes = serde_json::to_string_pretty(self)
+            .map_err(|e| {
+                eprintln!("invalid json: {e:?}");
+                PartsError::FailedToSave
+            })?
+            .into_bytes();
 
-        match std::fs::rename(NEW_PARTS_PATH, PARTS_PATH) {
-            Ok(_) => Ok(()),
-            Err(e) => {
-                eprintln!("failed to replace old database with new one: {:?}", e);
-                Err(PartsError::FailedToSave)
-            }
-        }
+        new_database_file.write_all(&json_bytes).map_err(|e| {
+            eprintln!("failed to write into a file: {e:?}");
+            PartsError::FailedToSave
+        })?;
+
+        new_database_file.sync_all().map_err(|e| {
+            eprintln!("failed to flush database file to disk: {e:?}");
+            PartsError::FailedToSave
+        })?;
+
+        std::fs::rename(NEW_PARTS_PATH, PARTS_PATH).map_err(|e| {
+            eprintln!("failed to replace old database with new one: {e:?}");
+            PartsError::FailedToSave
+        })
     }
 }
 
+/// Resumes an interrupted upload. Unlike a fresh send, the initial chunk
+/// queue is seeded from a completion-check request sent right after the
+/// handshake, so only chunks the server is actually missing get resent.
 pub fn reinit(
     mut stream: TcpStream,
     parts: State<Arc<RwLock<Parts>>>,
@@ -99,294 +89,72 @@ pub fn reinit(
     frontend_uuid: &str,
     app: AppHandle,
 ) -> std::io::Result<()> {
-    let send_uuid = match Uuid::from_str(send_uuid) {
-        Ok(u) => u,
-        Err(e) => {
-            eprintln!("failed to get uuid: {e:?}");
-            return Err(Error::last_os_error());
-        }
-    };
-    let (file_name, uuid, path) = {
+    let send_uuid = Uuid::from_str(send_uuid).map_err(|e| {
+        eprintln!("failed to get uuid: {e:?}");
+        Error::last_os_error()
+    })?;
+
+    let (uuid, path) = {
         let parts_lock = parts.read().unwrap();
-        let part = match parts_lock.send.iter().find(|s| s.uuid == send_uuid) {
-            Some(p) => p,
-            None => return Err(Error::last_os_error()),
-        };
-        (part.filename.clone(), part.uuid.clone(), part.path.clone())
+        let part = parts_lock
+            .send
+            .iter()
+            .find(|s| s.uuid == send_uuid)
+            .ok_or_else(Error::last_os_error)?;
+        (part.uuid, part.path.clone())
     };
-    let file_size = crate::app::get_file_size(Path::new(&path)).unwrap();
+
+    let file_size = get_file_size(Path::new(&path)).map_err(|e| {
+        eprintln!("failed to get file size: {e:?}");
+        Error::last_os_error()
+    })?;
+    let chunks_len = get_chunks_len(file_size);
+
     let first_message = first_message(10, &uuid, username, password);
-    println!("uuid: {:?}", uuid);
     stream.write_all(&first_message)?;
-    let mut buf = [0u8; CHUNK_SIZE];
-    stream.read(&mut buf)?;
-    println!("buf: {}", buf[0]);
 
-    let fil = Arc::new(File::open(path).unwrap());
-
-    let chunks_len = (file_size / (CHUNK_SIZE - OVERHEAD) as u64) + 1;
-
-    let chunks_to_send: Arc<Mutex<Vec<u64>>> = Arc::new(Mutex::new(Vec::new()));
-    let arc_stream: Arc<Mutex<TcpStream>> = Arc::new(Mutex::new(stream));
-
-    //u64 is id
-    let chunks_in_flight: Arc<Mutex<HashMap<u64, Duration>>> = Arc::new(Mutex::new(HashMap::new()));
-
-    {
-        arc_stream.lock().unwrap().set_nonblocking(true).unwrap();
+    let mut ack = [0u8; 1];
+    stream.read_exact(&mut ack)?;
+    if ack[0] != 20 {
+        eprintln!("reinit handshake rejected, code {}", ack[0]);
+        return Err(Error::last_os_error());
     }
 
-    loop {
-        let mut handles = Vec::new();
+    let file = Arc::new(File::open(&path)?);
 
-        let in_flight = Arc::new(Mutex::new(0));
-        let threads = chunks_len.min(MAX_THREADS);
-        let dead_threads = Arc::new(Mutex::new(0));
+    // seed the queue with only what's actually missing, instead of the whole file
+    let initial_chunks = request_missing_chunks(&mut stream, chunks_len)
+        .map_err(|e| {
+            eprintln!("completion check before reinit failed: {e:?}");
+            Error::last_os_error()
+        })?
+        .unwrap_or_default();
 
-        for i in 0..threads {
-            let dead_threads = dead_threads.clone();
-            let in_flight = in_flight.clone();
-            let chunks = chunks_to_send.clone();
-            let stream_clone = arc_stream.clone();
-            let file_clone = fil.clone();
-            let chunks_in_flight = chunks_in_flight.clone();
-            let app = app.clone();
-            let frontend_uuid = frontend_uuid.to_string().clone();
-            handles.push(thread::spawn(move || {
-                println!("worker #{} initialized", i);
-                let mut counter = 0;
-                loop {
-                    let in_f_c = in_flight.lock().unwrap().clone();
-                    if in_f_c > 5 {
-                        counter += 1;
-                        let count = {
-                            let guard = chunks.lock().unwrap_or_else(|e| e.into_inner());
-                            guard.len()
-                        } as f64
-                            - in_f_c as f64;
-                        let percent = (((chunks_len as f64 - count) as f64 / chunks_len as f64)
-                            * 100.0)
-                            .min(100.0) as u8;
-                        let _ = app.emit(
-                            "transfer-progress",
-                            ProgressPayload {
-                                transfer_id: frontend_uuid.to_string(),
-                                percent,
-                            },
-                        );
-                        thread::sleep(Duration::from_millis(50));
-                        if counter >= 10 {
-                            let mut now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
-                            let removed: Vec<(u64, Duration)> = chunks_in_flight
-                                .lock()
-                                .unwrap()
-                                .extract_if(|_k, value| value < &mut now)
-                                .collect();
-                            counter = 0;
-                            let mut in_f = in_flight.lock().unwrap();
-                            *in_f -= removed.len() as isize;
-                            println!("in flight: {in_f}");
-                        }
-                        continue;
-                    }
-                    let chunk = { chunks.lock().unwrap().pop() };
+    let result = run_send_loop(
+        stream,
+        file,
+        file_size,
+        chunks_len,
+        initial_chunks,
+        app,
+        frontend_uuid.to_string(),
+    );
 
-                    if let Some(index) = chunk {
-                        counter = 0;
-                        println!("worker #{} took chunk #{:?}", i, chunk);
-                        let remaining = file_size - (CHUNK_SIZE - OVERHEAD) as u64 * index;
-                        let chunk_size = remaining.min((CHUNK_SIZE - OVERHEAD) as u64) as usize;
-
-                        let mut buf = vec![0u8; chunk_size];
-                        file_clone
-                            .read_at(&mut buf, (CHUNK_SIZE - OVERHEAD) as u64 * index)
-                            .unwrap();
-                        let timestamp = SystemTime::now()
-                            .duration_since(UNIX_EPOCH)
-                            .unwrap()
-                            .saturating_add(Duration::from_secs(10));
-                        match send_chunk(&stream_clone, index, &buf) {
-                            Ok(_) => {
-                                let _ = chunks_in_flight.lock().unwrap().insert(index, timestamp);
-                                *in_flight.lock().unwrap() += 1;
-                            }
-                            Err(_) => {}
-                        };
-                        println!("in_flight is now: {:?}", in_flight.lock().unwrap());
-                    } else {
-                        println!("#{i} died");
-                        *dead_threads.lock().unwrap() += 1;
-                        break;
-                    }
-                }
-            }));
-        }
-
-        let mut in_f: isize = { in_flight.lock().unwrap().clone() };
-        while threads as usize > *dead_threads.lock().unwrap() || in_f > 0 {
-            let mut resp = [0u8; 16];
-
-            let n = {
-                let mut stream = arc_stream.lock().unwrap();
-                stream.read(&mut resp)
-            };
-
-            match n {
-                Ok(0) => {
-                    println!("closed");
-                    break;
-                } // connection closed
-                Ok(_) => {
-                    if resp[0] != 0 {
-                        println!("{:?}", resp[0]);
-                        if resp[0] == 20 {
-                            let id = u64::from_be_bytes(resp[8..].try_into().unwrap());
-                            chunks_in_flight.lock().unwrap().remove(&id);
-                        }
-
-                        *in_flight.lock().unwrap() -= 1;
-                        println!("subtracted");
-                    } else {
-                        println!("{:?}", resp);
-                        std::thread::sleep(std::time::Duration::from_millis(10));
-                        continue;
-                    }
-                }
-                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                    std::thread::sleep(std::time::Duration::from_millis(10));
-                    continue;
-                }
-                Err(e) => {
-                    eprintln!("{}", e);
-                }
+    match result {
+        Ok(()) => {
+            let mut parts_write = parts.write().unwrap();
+            if let Some(pos) = parts_write.send.iter().position(|item| item.uuid == uuid) {
+                parts_write.send.remove(pos);
             }
-
-            in_f = in_flight.lock().unwrap().clone();
+            let _ = parts_write.save();
+            Ok(())
         }
-        println!("here");
-        handles.into_iter().for_each(|handle| {
-            handle.join();
-        });
-        println!("there");
-
-        let mut buf = vec![0u8; 1];
-        buf[0] = 3;
-        let mut stream = arc_stream.lock().unwrap();
-
-        stream.write_all(&buf).unwrap();
-
-        println!("sent");
-
-        // client: read count first
-
-        let mut response_code = [0u8; 1];
-        loop {
-            match stream.read_exact(&mut response_code) {
-                Ok(_) => {
-                    if response_code[0] == 23 {
-                        println!("response for 3 is {:?}", response_code[0]);
-                        break;
-                    }
-                }
-                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                    std::thread::sleep(std::time::Duration::from_millis(10));
-                    continue;
-                }
-                Err(e) => {
-                    eprintln!("{}", e);
-                }
-            };
+        Err(e) => {
+            eprintln!("reinit transfer failed: {e:?}");
+            // leave the parts.json entry so another reinit attempt is still possible
+            Err(Error::last_os_error())
         }
-
-        println!("code: {:?}", response_code);
-
-        let code = response_code[0];
-
-        println!("response_code: {code}");
-
-        let mut count_buf = vec![0u8; 8];
-        stream.read_exact(&mut count_buf).map_err(|e| return e)?;
-
-        let count = u64::from_be_bytes(count_buf.try_into().unwrap());
-
-        println!("total missing: {:?}", count);
-
-        if count == 0 {
-            break;
-        }
-
-        // then read exactly count * 8 bytes
-        let mut missing_buf = vec![0u8; count as usize * 8];
-        stream.read_exact(&mut missing_buf).map_err(|e| return e)?;
-
-        let mut missing = Vec::new();
-        for chunk in missing_buf.chunks_exact(8) {
-            missing.push(u64::from_be_bytes(chunk.try_into().unwrap()));
-        }
-        chunks_to_send.lock().unwrap().append(&mut missing);
     }
-
-    let mut stream = arc_stream.lock().unwrap();
-
-    println!("waiting for server");
-
-    loop {
-        let mut buf = [0u8; 1];
-        match stream.read_exact(&mut buf) {
-            Ok(_) => match buf[0] {
-                21 => {
-                    println!("success");
-                    break;
-                }
-                val => {
-                    println!("44 header: {} not found", val);
-                }
-            },
-            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
-            Err(_) => {
-                println!("44 header: {} not found", buf[0]);
-            }
-        };
-    }
-
-    println!("sending hash");
-
-    let mut file_hash_buf: [u8; 32] = hash_file(fil).unwrap().try_into().unwrap();
-    let mut buf = vec![0u8; 33];
-    buf[1..].copy_from_slice(&mut file_hash_buf);
-    buf[0] = 4;
-
-    stream.write_all(&buf).unwrap();
-
-    println!("sent {:?}", buf);
-
-    loop {
-        let mut buf = [0u8; 1];
-        match stream.read_exact(&mut buf) {
-            Ok(_) => match buf[0] {
-                24 => {
-                    println!("success");
-                    {
-                        let mut parts = parts.write().unwrap();
-                        if let Some(pos) = parts.send.iter().position(|item| item.uuid == uuid) {
-                            parts.send.remove(pos);
-                        }
-                        parts.save();
-                    };
-                    break;
-                }
-                val => {
-                    println!("44 header: {} not found", val);
-                }
-            },
-            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
-            Err(_) => {
-                println!("44 header: {} not found", buf[0]);
-            }
-        };
-    }
-
-    Ok(())
 }
 
 pub fn first_message(
@@ -398,20 +166,22 @@ pub fn first_message(
     let username_bytes = username.as_bytes();
     let password_bytes = password.as_bytes();
 
-    if username_bytes.len() > 255 || password_bytes.len() > 255 {
-        panic!()
-    }
+    assert!(
+        username_bytes.len() <= 255 && password_bytes.len() <= 255,
+        "username/password must each be at most 255 bytes"
+    );
 
     let username_start = 2;
     let username_end = username_start + username_bytes.len();
     let password_start = username_end + 1;
     let password_end = password_start + password_bytes.len();
     let uuid_start = password_end;
-    let uuid_end = uuid_start + 16; // UUID is always exactly 16 bytes
+    let uuid_end = uuid_start + 16;
 
-    if uuid_end > CHUNK_SIZE {
-        panic!()
-    }
+    assert!(
+        uuid_end <= CHUNK_SIZE,
+        "first_message overflowed CHUNK_SIZE"
+    );
 
     let mut buf = [0u8; CHUNK_SIZE];
     buf[0] = message_code;
@@ -420,8 +190,6 @@ pub fn first_message(
     buf[username_end] = password_bytes.len() as u8;
     buf[password_start..password_end].copy_from_slice(password_bytes);
     buf[uuid_start..uuid_end].copy_from_slice(uuid.as_bytes());
-
-    println!("{:?}", buf[..uuid_end].to_vec());
 
     buf
 }

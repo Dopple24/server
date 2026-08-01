@@ -3,7 +3,7 @@ use crate::{
     delete_file,
     file_transfer::{CHUNK_SIZE, recieve, reinitialize},
     get_file, get_map, guest_request_file, manage_folder,
-    mapper::MapStore,
+    mapper::{MapStore, with_file_mut},
     request::RequestType,
     share_link::{self, LinkDatabase},
 };
@@ -47,26 +47,48 @@ pub fn handle_client(
             RequestType::Reinit => {
                 reinitialize(stream, buffer, max_workers, map_store, &client_uuid, offset)
             }
-            RequestType::GetFile => get_file::send_file(
-                stream,
-                buffer,
-                max_workers,
-                buf_len,
-                map_store,
-                &client_uuid,
-                offset,
-                false,
-            ),
-            RequestType::ReinitGetFile => get_file::send_file(
-                stream,
-                buffer,
-                max_workers,
-                buf_len,
-                map_store,
-                &client_uuid,
-                offset,
-                true,
-            ),
+            RequestType::GetFile => {
+                let file_uuid = get_file::send_file(
+                    stream,
+                    buffer,
+                    max_workers,
+                    buf_len,
+                    &map_store,
+                    &client_uuid,
+                    offset,
+                    false,
+                );
+                if let Some(file_uuid) = file_uuid {
+                    match with_file_mut(&file_uuid, &map_store, &client_uuid, |fil| fil.unlock()) {
+                        Ok(fil) => fil,
+                        Err(e) => {
+                            eprintln!("failed to unlock: {e:?}");
+                            return;
+                        }
+                    };
+                }
+            }
+            RequestType::ReinitGetFile => {
+                let file_uuid = get_file::send_file(
+                    stream,
+                    buffer,
+                    max_workers,
+                    buf_len,
+                    &map_store,
+                    &client_uuid,
+                    offset,
+                    true,
+                );
+                if let Some(file_uuid) = file_uuid {
+                    match with_file_mut(&file_uuid, &map_store, &client_uuid, |fil| fil.unlock()) {
+                        Ok(fil) => fil,
+                        Err(e) => {
+                            eprintln!("failed to unlock: {e:?}");
+                            return;
+                        }
+                    };
+                }
+            }
             RequestType::GetMap => get_map::get_map(stream, map_store, &client_uuid),
             RequestType::Delete => {
                 delete_file::delete_file(stream, buffer, map_store, &client_uuid, offset)

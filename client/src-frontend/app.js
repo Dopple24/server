@@ -1,12 +1,19 @@
 const { invoke } = window.__TAURI__.core;
 const { listen } = window.__TAURI__.event;
 
+
+
+const svg_icon = `<svg class=\"file-icon\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.8\"><path d=\"M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z\" /><path d=\"M14 2v6h6\" /></svg>`;
+
 listen('transfer-progress', (event) => {
   const { transfer_id, percent } = event.payload;
   updateTransferProgress(transfer_id, percent);
 });
+listen('file_name', (event) => {
+  const { transfer_id, filename } = event.payload;
+  updateFileName(transfer_id, filename)
 
-const svg_icon = `<svg class=\"file-icon\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.8\"><path d=\"M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z\" /><path d=\"M14 2v6h6\" /></svg>`;
+});
 
 const output = document.getElementById("output");
 const breadcrumb = document.getElementById("breadcrumb");
@@ -95,6 +102,7 @@ async function upload() {
   } catch (err) {
     showError(err);
   } finally {
+    showNotice("Upload complete", "success");
     removeTransferRow(transferId);
     fetchMap();
     loadPendingTransfers();
@@ -113,6 +121,7 @@ async function uploadReinit(uuid) {
   } catch (err) {
     showError(err);
   } finally {
+    showNotice("Upload complete", "success");
     removeTransferRow(uuid);
     fetchMap();
     loadPendingTransfers();
@@ -145,6 +154,7 @@ async function runDownload(transferId, uuid, isRetry) {
     setTransferError(transferId, message, () => runDownload(transferId, uuid, true));
   } finally {
     unlisten();
+    showNotice("Download complete", "success");
     removeTransferRow(transferId);
     loadPendingTransfers();
   }
@@ -158,7 +168,7 @@ async function download_reinit(uuid) {
         // if your Rust command reports progress via events, listen and call:
         // updateTransferProgress(transferId, percent);
         await invoke("download_reinit", { username, password, accUuid: uuid });
-        updateTransferProgress(transferId, 100);
+        //updateTransferProgress(transferId, 100);
     } catch (err) {
         showError(err);
     } finally {
@@ -531,6 +541,13 @@ function updateTransferProgress(id, percent) {
     row.querySelector(".transfer-progress-bar").style.width = `${percent}%`;
 }
 
+function updateTransferFileName(id, filename) {
+    const row = transferColumn.querySelector(`.transfer-row[data-transfer-id="${id}"]`);
+  if (!row) return;
+  row.querySelector(".file-name").innerHTML = `${svg_icon}
+  ${filename ?? id}`;
+}
+
 function updateFileName(id, file_name) {
     const row = transferColumn.querySelector(`.transfer-row[data-transfer-id="${id}"]`);
     if (!row) return;
@@ -568,10 +585,45 @@ function setTransferError(id, message, onRetry) {
     retryBtn.onclick = () => {
         row.classList.remove("transfer-error");
         errorLine.remove();
-        retryBtn.remove();
+      retryBtn.remove();
+      cancelBtn.remove();
         row.querySelector(".file-percent").textContent = "0%";
         onRetry();
     };
+
+    let cancelBtn = row.querySelector(".cancel-btn");
+    if (!cancelBtn) {
+        cancelBtn = document.createElement("button");
+        cancelBtn.className = "cancel-btn";
+        cancelBtn.textContent = "X";
+        row.appendChild(cancelBtn);
+    }
+  cancelBtn.onclick = () => {
+    row.remove();
+      remove_part(id)
+    };
+}
+
+async function remove_part(uuid) {
+  console.log("remove_part: called with uuid =", uuid);
+  try {
+    console.log("remove_part: invoking backend remove_part...");
+    const result = await invoke("remove_part", {
+      uuid,
+    });
+    console.log("remove_part: backend call succeeded, result =", result);
+
+    console.log("remove_part: calling fetchMap()");
+    fetchMap();
+
+    console.log("remove_part: calling loadPendingTransfers()");
+    loadPendingTransfers();
+
+    console.log("remove_part: done");
+  } catch (err) {
+    console.error("remove_part: failed for uuid =", uuid, "error =", err);
+    showNotice("failed to remove", "error");
+  }
 }
 
 function setTransferSuccess(id) {
@@ -706,6 +758,23 @@ function findPathByUuids(root, uuids) {
     }
 
     return path;
+}
+
+function showNotice(message, type = "info") {
+    // type: "success" | "error" | "info"
+    const notice = document.createElement("div");
+    notice.className = `notice notice-${type}`;
+    notice.textContent = message;
+
+    document.body.appendChild(notice);
+
+    // Let CSS transition it in (requires .notice { opacity: 0; transition: opacity .2s } in your CSS)
+    requestAnimationFrame(() => notice.classList.add("notice-visible"));
+
+    setTimeout(() => {
+        notice.classList.remove("notice-visible");
+        setTimeout(() => notice.remove(), 300); // wait for fade-out before removing
+    }, 3000);
 }
 
 // Run automatically as soon as the page loads.

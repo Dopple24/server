@@ -54,18 +54,18 @@ pub fn send_file(
     first_message: [u8; CHUNK_SIZE],
     max_workers: usize,
     buf_len: usize,
-    map_store: MapStore,
+    map_store: &MapStore,
     client_uuid: &Uuid,
     offset: usize,
     reinit: bool,
-) {
+) -> Option<Uuid> {
     println!("send_file called");
     let query = match Query::from_bytes(&first_message[offset..], buf_len) {
         Some(q) => q,
         None => {
             let buf = [48u8; 1];
             let _ = stream.write_all(&buf);
-            return;
+            return None;
         }
     };
 
@@ -74,7 +74,7 @@ pub fn send_file(
         Err(e) => {
             println!("error: {:?}", e);
             let _ = stream.write_all(&[e.get_code()]);
-            return;
+            return None;
         }
     };
 
@@ -83,7 +83,7 @@ pub fn send_file(
         Err(e) => {
             eprintln!("failed to open {path:?}: {e}");
             let _ = stream.write_all(&[ErrorTransfer::InternalServerError.get_code()]);
-            return; // or continue / propagate, depending on caller context
+            return Some(query.file_uuid); // or continue / propagate, depending on caller context
         }
     };
 
@@ -92,7 +92,7 @@ pub fn send_file(
         Err(e) => {
             eprintln!("failed to get metadata for {path:?}: {e}");
             let _ = stream.write_all(&[ErrorTransfer::InternalServerError.get_code()]);
-            return;
+            return Some(query.file_uuid);
         }
     };
 
@@ -107,7 +107,7 @@ pub fn send_file(
         Ok(_) => (),
         Err(e) => {
             eprintln!("connection failed: {e:?}");
-            return;
+            return Some(query.file_uuid);
         }
     };
 
@@ -115,7 +115,7 @@ pub fn send_file(
         match request_missing_chunks(&mut stream, chunks_len) {
             Ok(Some(missing)) => missing,
             Ok(None) => Vec::new(), // receiver already has everything — go straight to hash check
-            Err(()) => return,
+            Err(()) => return Some(query.file_uuid),
         }
     } else {
         (0..chunks_len).collect()
@@ -143,7 +143,7 @@ pub fn send_file(
                 Err(e) => {
                     eprintln!("failed to clone stream: {e:?}");
                     let _ = stream.write_all(&[ErrorTransfer::InternalServerError.get_code()]);
-                    return;
+                    return Some(query.file_uuid);
                 }
             };
             let (tx, writer_handle) = init_writer(stream_clone);
@@ -154,7 +154,7 @@ pub fn send_file(
                 Err(e) => {
                     eprintln!("failed to clone stream: {e:?}");
                     let _ = stream.write_all(&[ErrorTransfer::InternalServerError.get_code()]);
-                    return;
+                    return Some(query.file_uuid);
                 }
             };
             let reader_handle = init_reader(
@@ -208,7 +208,7 @@ pub fn send_file(
 
             let missing_opt = match request_missing_chunks(&mut stream, chunks_len) {
                 Ok(opt) => opt,
-                Err(()) => return,
+                Err(()) => return Some(query.file_uuid),
             };
 
             match missing_opt {
@@ -218,7 +218,7 @@ pub fn send_file(
                 Some(mut missing) => {
                     if attempt_count > 5 {
                         eprintln!("failed to finish in 5 attempts, shutting down.");
-                        return;
+                        return Some(query.file_uuid);
                     }
                     let mut guard = chunks_to_send.0.lock().unwrap_or_else(|e| {
                         eprintln!("chunks_to_send was poisoned");
@@ -233,16 +233,16 @@ pub fn send_file(
         Ok(_) => (),
         Err(e) => {
             eprintln!("failed to write_all: {e:?}");
-            return;
+            return Some(query.file_uuid);
         }
     }
     println!("SENT 4");
-    let hash_here = match hash_file(arc_file) {
+    let hash_here = match hash_file(arc_file.clone()) {
         Ok(h) => h,
         Err(e) => {
             eprintln!("failed to hash a file: {e:?}");
             let _ = stream.write_all(&[ErrorTransfer::InternalServerError.get_code()]);
-            return;
+            return Some(query.file_uuid);
         }
     };
     let mut hash_buf = [0u8; 33];
@@ -250,14 +250,14 @@ pub fn send_file(
         Ok(_) => (),
         Err(e) => {
             eprintln!("failed to read: {e:?}");
-            return;
+            return Some(query.file_uuid);
         }
     }
     match hash_buf[0] {
         24 => (),
         e => {
             eprintln!("hash check failed with code {e}");
-            return;
+            return Some(query.file_uuid);
         }
     }
     let hash = Hash::from_bytes(hash_buf[1..33].try_into().unwrap());
@@ -266,16 +266,7 @@ pub fn send_file(
     } else {
         let _ = stream.write_all(&[44]);
     }
-
-    match with_file_mut(&query.file_uuid, &map_store, client_uuid, |fil| {
-        fil.unlock()
-    }) {
-        Ok(fil) => fil,
-        Err(e) => {
-            eprintln!("failed to unlock: {e:?}");
-            return;
-        }
-    };
+    return Some(query.file_uuid);
 }
 
 /// Sends a completion-check request (byte `3`) and reads back which chunk ids

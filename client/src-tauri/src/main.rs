@@ -7,7 +7,8 @@ use std::{
     path::Path,
     sync::{Arc, RwLock},
 };
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, Emitter, State};
+use uuid::Uuid;
 
 use std::sync::mpsc;
 use tauri_plugin_dialog::DialogExt;
@@ -17,6 +18,12 @@ use crate::{
     login_attempt::login_attempt,
     reinit::{reinit, Parts},
 };
+
+#[derive(serde::Serialize, Clone)]
+struct FileName {
+    transfer_id: String,
+    filename: String,
+}
 
 mod app;
 mod auth;
@@ -47,6 +54,22 @@ fn request_parts(parts: State<'_, Arc<RwLock<Parts>>>) -> Result<Parts, String> 
         .read()
         .map(|guard| guard.clone())
         .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn remove_part(uuid: Uuid, parts: State<'_, Arc<RwLock<Parts>>>) -> Result<(), String> {
+    let mut parts_write = parts.write().unwrap();
+    if let Some(pos) = parts_write.send.iter().position(|item| item.uuid == uuid) {
+        parts_write.send.remove(pos);
+        let _ = parts_write.save();
+        Ok(())
+    } else if let Some(pos) = parts_write.acc.iter().position(|item| item.uuid == uuid) {
+        parts_write.send.remove(pos);
+        let _ = parts_write.save();
+        Ok(())
+    } else {
+        Err("uuid not found".to_string())
+    }
 }
 
 #[tauri::command]
@@ -145,6 +168,14 @@ async fn upload(
             eprintln!("invalid filename");
             "invalid filename".to_string()
         })?;
+
+    let _ = app.emit(
+        "file_name",
+        FileName {
+            transfer_id: frontend_uuid.to_string(),
+            filename: file_name.to_string(),
+        },
+    );
 
     match sending(
         stream,
@@ -285,6 +316,7 @@ fn main() {
             request_parts,
             create_folder,
             share_file,
+            remove_part,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
