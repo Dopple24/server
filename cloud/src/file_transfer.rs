@@ -1,3 +1,4 @@
+use crate::map_tracker::notify_change;
 use crate::mapper::Fil;
 use crate::mapper::MapStore;
 use crate::response;
@@ -12,6 +13,7 @@ use std::io::{self, BufReader, Read, Seek, SeekFrom, Write};
 use std::net::TcpStream;
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
+use std::sync::Condvar;
 use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
@@ -74,6 +76,7 @@ pub fn reinitialize(
     map_store: MapStore,
     client_uuid: &Uuid,
     offset: usize,
+    signal: &(Mutex<u64>, Condvar),
 ) {
     println!("reinitialization called");
 
@@ -187,6 +190,7 @@ pub fn reinitialize(
         &map_store,
         client_uuid,
         Some(transfered_file.parent_folder_uuid),
+        signal,
     );
 }
 
@@ -197,6 +201,7 @@ pub fn recieve(
     map_store: MapStore,
     client_uuid: &Uuid,
     offset: usize,
+    signal: &(Mutex<u64>, Condvar),
 ) {
     let transfered_file = match init_transfer(&init_message[offset - 1..], &map_store) {
         Ok(f) => Arc::new(f),
@@ -230,6 +235,7 @@ pub fn recieve(
         &map_store,
         client_uuid,
         Some(transfered_file.parent_folder_uuid),
+        signal,
     );
 }
 
@@ -628,6 +634,7 @@ fn finish_and_register(
     map_store: &MapStore,
     client_uuid: &Uuid,
     parent_folder_uuid: Option<Uuid>,
+    signal: &(Mutex<u64>, Condvar),
 ) {
     let file_name = match transfered_file
         .storage_path
@@ -682,6 +689,8 @@ fn finish_and_register(
     if let Err(e) = fs::remove_file(&cfg_path) {
         eprintln!("failed to remove config file {cfg_path:?}: {e}");
     }
+    notify_change(signal);
+    println!("notified");
 }
 
 fn now_nanos() -> u64 {

@@ -109,12 +109,12 @@ pub fn get_parts_rw_lock() -> Arc<RwLock<Parts>> {
 pub fn sending(
     mut stream: TcpStream,
     path_str: &str,
-    parts: State<Arc<RwLock<Parts>>>,
+    parts: Arc<RwLock<Parts>>,
     username: &str,
     password: &str,
     folder_uuid: &str,
     frontend_uuid: &str,
-    app: AppHandle,
+    app: &mut AppHandle,
 ) -> io::Result<()> {
     let path = Path::new(path_str);
     let filename = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
@@ -193,7 +193,7 @@ pub fn run_send_loop(
     file_size: u64,
     chunks_len: u64,
     initial_chunks: Vec<u64>,
-    app: AppHandle,
+    app: &mut AppHandle,
     frontend_uuid: String,
 ) -> Result<(), TransferError> {
     let chunks_to_send: ChunkQueue = Arc::new((Mutex::new(initial_chunks), Condvar::new()));

@@ -1,9 +1,16 @@
-use std::{eprintln, fs::remove_file, io::Write, net::TcpStream};
+use std::{
+    eprintln,
+    fs::remove_file,
+    io::Write,
+    net::TcpStream,
+    sync::{Condvar, Mutex},
+};
 
 use uuid::Uuid;
 
 use crate::{
     file_transfer::CHUNK_SIZE,
+    map_tracker::notify_change,
     mapper::{MapStore, with_file_mut},
     response::{Code, ErrorTransfer, TransferSuccess},
 };
@@ -14,6 +21,7 @@ pub fn delete_file(
     map_store: MapStore,
     client_uuid: &Uuid,
     offset: usize,
+    signal: &(Mutex<u64>, Condvar),
 ) {
     let uuid = Uuid::from_bytes(first_message[offset..16 + offset].try_into().unwrap());
     println!("uuid: {:?}", uuid);
@@ -58,6 +66,7 @@ pub fn delete_file(
 
     match map_store.remove_file(&uuid, client_uuid) {
         Ok(_) => {
+            notify_change(signal);
             let _ = stream.write_all(&[TransferSuccess::Ok.get_code()]);
         }
         Err(e) => {

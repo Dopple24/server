@@ -77,13 +77,13 @@ type ChunkLog = Arc<Mutex<HashSet<u64>>>;
 pub fn request(
     mut stream: TcpStream,
     max_workers: usize,
-    parts: State<Arc<RwLock<Parts>>>,
+    parts: Arc<RwLock<Parts>>,
     username: &str,
     password: &str,
     fil_uuid: &str,
     path_for_the_requested_file: &str,
     frontend_uuid: &str,
-    app: AppHandle,
+    app: &mut AppHandle,
 ) -> io::Result<()> {
     let path = Path::new(path_for_the_requested_file);
     let filename = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
@@ -140,13 +140,13 @@ pub fn request(
 
 pub fn reinitialize(
     mut stream: TcpStream,
-    parts: State<Arc<RwLock<Parts>>>,
+    parts: Arc<RwLock<Parts>>,
     max_workers: usize,
     acc_uuid: &str,
     username: &str,
     password: &str,
     frontend_uuid: &str,
-    app: AppHandle,
+    app: &mut AppHandle,
 ) -> io::Result<()> {
     let (real_path, temp_path, file_uuid) = {
         let uuid = Uuid::from_str(acc_uuid).map_err(|e| {
@@ -243,7 +243,7 @@ fn receive_file(
     real_path: &str,
     max_workers: usize,
     file_size_chunks: u64,
-    app: AppHandle,
+    app: &mut AppHandle,
     frontend_uuid: &str,
 ) -> Result<(), ErrorTransfer> {
     let transfered_file = init_transfer(temp_path, real_path, file_size_chunks)?;
@@ -273,7 +273,7 @@ fn run_transfer_loop(
     transfered_file: &Arc<TransferedFile>,
     max_workers: usize,
     chunk_log: ChunkLog,
-    app: AppHandle,
+    app: &mut AppHandle,
     frontend_uuid: &str,
 ) -> Result<(), ErrorTransfer> {
     println!("started run transfer loop");

@@ -3,18 +3,22 @@
 
 use std::{
     env::args,
+    io::Write,
     net::TcpStream,
-    path::Path,
-    sync::{Arc, RwLock},
+    path::{Path, PathBuf},
+    sync::{
+        mpsc::{self, Receiver},
+        Arc, Mutex, RwLock,
+    },
+    thread,
 };
-use tauri::{AppHandle, Emitter, State};
-use uuid::Uuid;
-
-use std::sync::mpsc;
+use tauri::{AppHandle, Emitter, State}; // async_runtime::Mutex removed
 use tauri_plugin_dialog::DialogExt;
+use uuid::Uuid;
 
 use crate::{
     app::{get_parts_rw_lock, sending, serve_public, SOCKET},
+    get_map::first_message,
     login_attempt::login_attempt,
     reinit::{reinit, Parts},
 };
@@ -23,6 +27,34 @@ use crate::{
 struct FileName {
     transfer_id: String,
     filename: String,
+}
+
+#[derive(serde::Serialize, Clone)]
+struct UploadItem {
+    folder_uuid: String,
+    path: String,
+    username: String,
+    password: String,
+    frontend_uuid: String,
+    is_reinit: bool,
+}
+
+struct UploadQueue {
+    tx: Mutex<mpsc::Sender<UploadItem>>,
+}
+
+#[derive(serde::Serialize, Clone)]
+struct DownloadItem {
+    username: String,
+    password: String,
+    file_uuid: String,
+    frontend_uuid: String,
+    path: Option<String>,
+    is_reinit: bool,
+}
+
+struct DownloadQueue {
+    tx: Mutex<mpsc::Sender<DownloadItem>>,
 }
 
 mod app;
@@ -143,9 +175,9 @@ async fn upload(
     password: String,
     folder_uuid: String,
     frontend_uuid: String,
-    parts: State<'_, Arc<RwLock<Parts>>>,
+    upload_q: State<'_, UploadQueue>,
     app: tauri::AppHandle,
-) -> Result<String, String> {
+) -> Result<(), String> {
     let (tx, rx) = mpsc::channel();
     app.dialog().file().pick_file(move |file_path| {
         let _ = tx.send(file_path.map(|p| p.to_string()));
@@ -156,10 +188,6 @@ async fn upload(
         .map_err(|e| e.to_string())?
         .map_err(|e| e.to_string())?
         .ok_or("failed to select a file".to_string())?;
-
-    println!("upload called");
-    let stream = TcpStream::connect(SOCKET).map_err(|e| e.to_string())?;
-    println!("connected");
 
     let file_name = Path::new(&path)
         .file_name()
@@ -177,20 +205,21 @@ async fn upload(
         },
     );
 
-    match sending(
-        stream,
-        &path,
-        parts,
-        &username,
-        &password,
-        &folder_uuid,
-        &frontend_uuid,
-        app,
-    ) {
-        //<-- this panics
-        Ok(_) => Ok(file_name.to_string()),
-        Err(e) => Err(e.to_string()),
+    let item = UploadItem {
+        folder_uuid,
+        path,
+        username,
+        password,
+        frontend_uuid,
+        is_reinit: false,
+    };
+
+    {
+        let guard = upload_q.tx.lock().unwrap_or_else(|e| e.into_inner());
+        guard.send(item);
     }
+
+    Ok(())
 }
 
 #[tauri::command]
@@ -199,23 +228,23 @@ async fn upload_reinit(
     password: String,
     send_uuid: String,
     frontend_uuid: String,
-    app: AppHandle,
-    parts: State<'_, Arc<RwLock<Parts>>>,
+    upload_q: State<'_, UploadQueue>,
 ) -> Result<(), String> {
-    let stream = TcpStream::connect(SOCKET).map_err(|e| e.to_string())?;
-    println!("connected");
-    match reinit(
-        stream,
-        parts,
-        &send_uuid,
-        &username,
-        &password,
-        &frontend_uuid,
-        app,
-    ) {
-        Ok(a) => Ok(a),
-        Err(e) => Err(e.to_string()),
+    let item = UploadItem {
+        folder_uuid: send_uuid,
+        path: String::new(),
+        username,
+        password,
+        frontend_uuid,
+        is_reinit: true,
+    };
+
+    {
+        let guard = upload_q.tx.lock().unwrap_or_else(|e| e.into_inner());
+        guard.send(item);
     }
+
+    Ok(())
 }
 
 #[tauri::command]
@@ -225,7 +254,7 @@ async fn download(
     file_uuid: String,
     frontend_uuid: String,
     file_name: String,
-    parts: State<'_, Arc<RwLock<Parts>>>,
+    download_q: State<'_, DownloadQueue>,
     app: tauri::AppHandle,
 ) -> Result<(), String> {
     let (tx, rx) = mpsc::channel();
@@ -240,24 +269,22 @@ async fn download(
         .map_err(|e| e.to_string())?
         .map_err(|e| e.to_string())?
         .ok_or("no destination selected".to_string())?;
-    println!("download called");
-    let stream = TcpStream::connect(SOCKET).map_err(|e| e.to_string())?;
-    println!("connected");
 
-    match request_file::request(
-        stream,
-        10,
-        parts,
-        &username,
-        &password,
-        &file_uuid,
-        &path,
-        &frontend_uuid,
-        app,
-    ) {
-        Ok(a) => Ok(a),
-        Err(e) => Err(e.to_string()),
+    let item = DownloadItem {
+        username,
+        password,
+        file_uuid,
+        frontend_uuid,
+        path: Some(path),
+        is_reinit: false,
+    };
+
+    {
+        let guard = download_q.tx.lock().unwrap_or_else(|e| e.into_inner());
+        guard.send(item);
     }
+
+    Ok(())
 }
 
 #[tauri::command]
@@ -265,24 +292,47 @@ async fn download_reinit(
     username: String,
     password: String,
     acc_uuid: String,
-    parts: State<'_, Arc<RwLock<Parts>>>,
+    download_q: State<'_, DownloadQueue>,
     frontend_uuid: String,
-    app: tauri::AppHandle,
 ) -> Result<(), String> {
-    let stream = TcpStream::connect(SOCKET).map_err(|e| e.to_string())?;
-    println!("connected");
-    match request_file::reinitialize(
-        stream,
-        parts,
-        10,
-        &acc_uuid,
-        &username,
-        &password,
-        &frontend_uuid,
-        app,
-    ) {
-        Ok(a) => Ok(a),
-        Err(e) => Err(e.to_string()),
+    let item = DownloadItem {
+        username,
+        password,
+        file_uuid: acc_uuid,
+        frontend_uuid,
+        path: None,
+        is_reinit: true,
+    };
+
+    {
+        let guard = download_q.tx.lock().unwrap_or_else(|e| e.into_inner());
+        guard.send(item);
+    }
+
+    Ok(())
+}
+
+#[tauri::command]
+async fn start_tracker(username: String, password: String, app: AppHandle) -> Result<(), String> {
+    let mut stream = TcpStream::connect(SOCKET).map_err(|e| e.to_string())?;
+    let _ = stream.write_all(&first_message(53, &username, &password));
+    loop {
+        println!("was in start_tracker");
+        let map_bytes = match get_map::recv_framed(&mut stream) {
+            Ok(b) => b,
+            Err(e) => {
+                eprintln!("failed to recv_frfamed: {e:?}");
+                return Err(e.to_string());
+            }
+        };
+        let map: get_map::FolderMap = match serde_json::from_slice(&map_bytes) {
+            Ok(m) => m,
+            Err(e) => {
+                eprintln!("invalid map: {e:?}");
+                return Err(e.to_string());
+            }
+        };
+        println!("map: {map:#?}");
     }
 }
 
@@ -296,6 +346,89 @@ async fn register(username: String, password: String, admin_pass: String) -> Res
     }
 }
 
+fn setup_upload_q(parts: Arc<RwLock<Parts>>, mut handle: AppHandle, rx: Receiver<UploadItem>) {
+    thread::spawn(move || {
+        for transfer in rx {
+            let stream = TcpStream::connect(SOCKET)
+                .map_err(|e| e.to_string())
+                .unwrap();
+
+            match if transfer.is_reinit {
+                reinit(
+                    stream,
+                    parts.clone(),
+                    &transfer.folder_uuid,
+                    &transfer.username,
+                    &transfer.password,
+                    &transfer.frontend_uuid,
+                    &mut handle,
+                )
+            } else {
+                sending(
+                    stream,
+                    &transfer.path,
+                    parts.clone(),
+                    &transfer.username,
+                    &transfer.password,
+                    &transfer.folder_uuid,
+                    &transfer.frontend_uuid,
+                    &mut handle,
+                )
+            } {
+                Ok(_) => (),
+                Err(e) => println!("upload failed: {e:?}"),
+            }
+        }
+    });
+}
+
+fn setup_download_q(parts: Arc<RwLock<Parts>>, mut handle: AppHandle, rx: Receiver<DownloadItem>) {
+    thread::spawn(move || {
+        for transfer in rx {
+            println!("download called");
+            let stream = TcpStream::connect(SOCKET)
+                .map_err(|e| e.to_string())
+                .unwrap();
+            println!("connected");
+
+            let res = if transfer.is_reinit {
+                match request_file::reinitialize(
+                    stream,
+                    parts.clone(),
+                    10,
+                    &transfer.file_uuid,
+                    &transfer.username,
+                    &transfer.password,
+                    &transfer.frontend_uuid,
+                    &mut handle,
+                ) {
+                    Ok(a) => Ok(a),
+                    Err(e) => Err(e.to_string()),
+                }
+            } else {
+                if transfer.path.is_none() {
+                    continue;
+                }
+                match request_file::request(
+                    stream,
+                    10,
+                    parts.clone(),
+                    &transfer.username,
+                    &transfer.password,
+                    &transfer.file_uuid,
+                    &transfer.path.unwrap(),
+                    &transfer.frontend_uuid,
+                    &mut handle,
+                ) {
+                    Ok(a) => Ok(a),
+                    Err(e) => Err(e.to_string()),
+                }
+            };
+            println!("result of download: {res:?}");
+        }
+    });
+}
+
 fn main() {
     let args: Vec<String> = args().collect();
     if args.get(1).map(|a| a == "--serve_public").unwrap_or(false) {
@@ -303,9 +436,26 @@ fn main() {
     }
 
     let parts = get_parts_rw_lock();
+    let parts_for_state = parts.clone();
+    let (tx_upl, rx_upl) = mpsc::channel::<UploadItem>();
+    let (tx_dwn, rx_dwn) = mpsc::channel::<DownloadItem>();
+
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
-        .manage(parts)
+        .manage(parts_for_state)
+        .manage(UploadQueue {
+            tx: Mutex::new(tx_upl),
+        })
+        .manage(DownloadQueue {
+            tx: Mutex::new(tx_dwn),
+        })
+        .setup(move |app| {
+            let handle = app.handle().clone();
+            let parts = parts.clone();
+            setup_upload_q(parts.clone(), handle.clone(), rx_upl);
+            setup_download_q(parts, handle, rx_dwn);
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             greet,
             request_map,
@@ -322,6 +472,7 @@ fn main() {
             create_folder,
             share_file,
             remove_part,
+            start_tracker,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

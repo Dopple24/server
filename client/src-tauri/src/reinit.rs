@@ -7,7 +7,7 @@ use std::{
     str::FromStr,
     sync::{Arc, RwLock},
 };
-use tauri::{AppHandle, State};
+use tauri::AppHandle;
 use uuid::Uuid;
 
 use crate::app::{
@@ -82,12 +82,12 @@ impl Parts {
 /// handshake, so only chunks the server is actually missing get resent.
 pub fn reinit(
     mut stream: TcpStream,
-    parts: State<Arc<RwLock<Parts>>>,
+    parts: Arc<RwLock<Parts>>,
     send_uuid: &str,
     username: &str,
     password: &str,
     frontend_uuid: &str,
-    app: AppHandle,
+    app: &mut AppHandle,
 ) -> std::io::Result<()> {
     let send_uuid = Uuid::from_str(send_uuid).map_err(|e| {
         eprintln!("failed to get uuid: {e:?}");

@@ -23,7 +23,7 @@ pub struct FilMap {
     path: PathBuf,
 }
 
-pub fn get_map(mut stream: TcpStream, map_store: MapStore, client_uuid: &Uuid) {
+pub fn get_map(mut stream: &mut TcpStream, map_store: &MapStore, client_uuid: &Uuid) {
     println!("map requested by client: {client_uuid:?}");
     let read_lock = map_store.read().unwrap();
     let new_map = to_client_map(&read_lock, client_uuid);

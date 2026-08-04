@@ -3,6 +3,7 @@ use crate::{
     delete_file,
     file_transfer::{CHUNK_SIZE, recieve, reinitialize},
     get_file, get_map, guest_request_file, manage_folder,
+    map_tracker::{self, track},
     mapper::{MapStore, with_file_mut},
     request::RequestType,
     share_link::{self, LinkDatabase},
@@ -11,13 +12,14 @@ use std::{
     io::{Read, Write},
     net::TcpStream,
     println,
-    sync::{Arc, RwLock},
+    sync::{Arc, Condvar, Mutex, RwLock},
 };
 
 pub fn handle_client(
     mut stream: TcpStream,
     max_workers: usize,
     map_store: MapStore,
+    signal: &(Mutex<u64>, Condvar),
     public_links: &Arc<RwLock<LinkDatabase>>,
 ) {
     let mut buffer = [0u8; CHUNK_SIZE];
@@ -41,12 +43,24 @@ pub fn handle_client(
             }
         };
         match request_type {
-            RequestType::Init => {
-                recieve(stream, buffer, max_workers, map_store, &client_uuid, offset)
-            }
-            RequestType::Reinit => {
-                reinitialize(stream, buffer, max_workers, map_store, &client_uuid, offset)
-            }
+            RequestType::Init => recieve(
+                stream,
+                buffer,
+                max_workers,
+                map_store,
+                &client_uuid,
+                offset,
+                signal,
+            ),
+            RequestType::Reinit => reinitialize(
+                stream,
+                buffer,
+                max_workers,
+                map_store,
+                &client_uuid,
+                offset,
+                signal,
+            ),
             RequestType::GetFile => {
                 let file_uuid = get_file::send_file(
                     stream,
@@ -89,12 +103,19 @@ pub fn handle_client(
                     };
                 }
             }
-            RequestType::GetMap => get_map::get_map(stream, map_store, &client_uuid),
+            RequestType::GetMap => get_map::get_map(&mut stream, &map_store, &client_uuid),
             RequestType::Delete => {
-                delete_file::delete_file(stream, buffer, map_store, &client_uuid, offset)
+                delete_file::delete_file(stream, buffer, map_store, &client_uuid, offset, signal)
             }
             RequestType::DeleteFolder => {
-                manage_folder::delete_folder(stream, buffer, map_store, &client_uuid, offset);
+                manage_folder::delete_folder(
+                    stream,
+                    buffer,
+                    map_store,
+                    &client_uuid,
+                    offset,
+                    signal,
+                );
             }
             RequestType::ShareLink => {
                 share_link::share_link(
@@ -110,7 +131,17 @@ pub fn handle_client(
                 auth::attempt_login(stream);
             }
             RequestType::CreateFolder => {
-                manage_folder::create_folder(stream, buffer, map_store, &client_uuid, offset);
+                manage_folder::create_folder(
+                    stream,
+                    buffer,
+                    map_store,
+                    &client_uuid,
+                    offset,
+                    signal,
+                );
+            }
+            RequestType::MapTracker => {
+                map_tracker::track(stream, map_store, &client_uuid, signal);
             }
             _ => {
                 println!("shuting down");

@@ -1,8 +1,6 @@
 const { invoke } = window.__TAURI__.core;
 const { listen } = window.__TAURI__.event;
 
-
-
 const svg_icon = `<svg class=\"file-icon\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.8\"><path d=\"M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z\" /><path d=\"M14 2v6h6\" /></svg>`;
 
 listen('transfer-progress', (event) => {
@@ -21,6 +19,7 @@ const entryList = document.getElementById("entry-list");
 const upBtn = document.getElementById("up-btn");
 const uploadBtn = document.getElementById("upload-btn");
 const newFolderBtn = document.getElementById("new-folder-btn");
+const startTracker = document.getElementById("tracker-btn");
 
 const transferManager = document.getElementById("transfer-manager");
 const transferColumn = document.getElementById("transfer-column");
@@ -96,8 +95,10 @@ async function upload() {
       password,
       folderUuid: currentFolderUuid(),
       frontendUuid: transferId,
-    });
-    updateTransferProgress(transferId, 100); // safety-net in case the last progress event was missed
+    }); // this is 1)
+
+    //this is FUCKED, just as the download part is :) - upload endpoint creates its own thread, making this async on two different levels. await here doesn't mean the response actually came. At this point we have no idea if the transfer actually went well or not
+    updateTransferProgress(transferId, 100);
     showNotice("Upload complete", "success");
   } catch (err) {
     showError(err);
@@ -105,7 +106,7 @@ async function upload() {
   } finally {
     removeTransferRow(transferId);
     fetchMap();
-    loadPendingTransfers();
+    loadPendingTransfers(); //<-- this gets its response before 1), showing a false failed
   }
 }
 
@@ -752,6 +753,19 @@ function startNewFolderRow() {
 }
 
 newFolderBtn.addEventListener("click", startNewFolderRow);
+
+startTracker.addEventListener("click", track)
+
+async function track() {
+  try {
+    await invoke("start_tracker", {
+      username,
+      password,
+    });
+  } catch (e){
+    console.log(e);
+  }
+}
 
 function currentPathUuids() {
     // Skip the root itself (index 0), since root has no "which child" info needed

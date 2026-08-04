@@ -1,7 +1,7 @@
 use router::handle_client;
 use std::{
     net::TcpListener,
-    sync::{Arc, RwLock},
+    sync::{Arc, Condvar, Mutex, RwLock},
 };
 
 use crate::mapper::MapStore;
@@ -14,6 +14,7 @@ mod get_file;
 mod get_map;
 mod guest_request_file;
 mod manage_folder;
+mod map_tracker;
 mod mapper;
 mod request;
 mod response;
@@ -30,15 +31,18 @@ fn main() -> std::io::Result<()> {
     let listener = TcpListener::bind("127.0.0.1:6543")?;
     println!("Server listening on 127.0.0.1:6543");
 
+    let signal = Arc::new((Mutex::new(0u64), Condvar::new()));
+
     for stream in listener.incoming() {
         let store_clone = map_store.clone();
         let links_clone = public_links.clone();
+        let signal = signal.clone();
         match stream {
             Ok(stream) => {
                 println!("New connection: {}", stream.peer_addr()?);
 
                 std::thread::spawn(move || {
-                    handle_client(stream, 5, store_clone, &links_clone);
+                    handle_client(stream, 5, store_clone, &signal, &links_clone);
                 });
             }
             Err(e) => {

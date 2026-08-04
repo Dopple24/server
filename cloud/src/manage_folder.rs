@@ -1,9 +1,14 @@
-use std::{io::Write, net::TcpStream};
+use std::{
+    io::Write,
+    net::TcpStream,
+    sync::{Condvar, Mutex},
+};
 
 use uuid::Uuid;
 
 use crate::{
     file_transfer::CHUNK_SIZE,
+    map_tracker::notify_change,
     mapper::{AccessControl, MapStore},
     response::{Code, ErrorTransfer, TransferSuccess},
 };
@@ -14,6 +19,7 @@ pub fn create_folder(
     map_store: MapStore,
     client_uuid: &Uuid,
     offset: usize,
+    signal: &(Mutex<u64>, Condvar),
 ) {
     let parent_folder_uuid_beggining = offset;
     let parent_folder_uuid_end = offset + 16;
@@ -60,6 +66,7 @@ pub fn create_folder(
         access,
     ) {
         Ok(_) => {
+            notify_change(signal);
             let _ = stream.write_all(&[TransferSuccess::Ok.get_code()]);
         }
         Err(e) => {
@@ -74,6 +81,7 @@ pub fn delete_folder(
     map_store: MapStore,
     client_uuid: &Uuid,
     offset: usize,
+    signal: &(Mutex<u64>, Condvar),
 ) {
     println!("delete folder called");
     let folder_uuid_beggining = offset;
@@ -85,6 +93,7 @@ pub fn delete_folder(
     );
     match map_store.delete_folder(folder_uuid, client_uuid) {
         Ok(_) => {
+            signal.1.notify_all();
             let _ = stream.write_all(&[TransferSuccess::Ok.get_code()]);
         }
         Err(e) => {

@@ -22,6 +22,7 @@ pub enum RequestType {
     ShareLink,
     LoginAttempt,
     CreateFolder,
+    MapTracker,
 }
 
 impl RequestType {
@@ -39,6 +40,7 @@ impl RequestType {
             9 => Self::GetMap,
             34 => Self::LoginAttempt,
             50 => Self::CreateFolder,
+            53 => Self::MapTracker,
             100 => Self::ShareLink,
             200 => Self::GuestRequestFile,
             254 => Self::DeleteFolder,
