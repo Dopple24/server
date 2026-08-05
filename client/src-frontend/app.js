@@ -13,13 +13,13 @@ listen('file_name', (event) => {
 
 });
 
+
 const output = document.getElementById("output");
 const breadcrumb = document.getElementById("breadcrumb");
 const entryList = document.getElementById("entry-list");
 const upBtn = document.getElementById("up-btn");
 const uploadBtn = document.getElementById("upload-btn");
 const newFolderBtn = document.getElementById("new-folder-btn");
-const startTracker = document.getElementById("tracker-btn");
 
 const transferManager = document.getElementById("transfer-manager");
 const transferColumn = document.getElementById("transfer-column");
@@ -36,6 +36,13 @@ if (!username || !password) {
 
 // The full tree, fetched once. Navigation below just walks this in memory.
 let rootFolder = null;
+
+listen('folder-map-updated', (event) => {
+  const savedPath = currentPathUuids();
+  rootFolder = event.payload;
+  pathStack = findPathByUuids(rootFolder, savedPath);
+  render();
+});
 
 // Stack of folders from root to current, e.g. [root, sub, subsub].
 // The last entry is always "where we are now".
@@ -86,27 +93,45 @@ function goUp() {
     }
 }
 
+function waitForTransferCompletion(transferId) {
+  return new Promise((resolve, reject) => {
+    let unlisten;
+    listen('transfer-complete', (event) => {
+      if (event.payload.transfer_id !== transferId) return;
+      unlisten?.();
+      if (event.payload.success) {
+        resolve();
+      } else {
+        reject(new Error(event.payload.error ?? "Transfer failed"));
+      }
+    }).then((fn) => { unlisten = fn; });
+  });
+}
+
 async function upload() {
   const transferId = crypto.randomUUID();
   addTransferRow(transferId);
+
+  const done = waitForTransferCompletion(transferId); // listener armed first
+
   try {
     await invoke("upload", {
       username,
       password,
       folderUuid: currentFolderUuid(),
       frontendUuid: transferId,
-    }); // this is 1)
+    }); // resolves once queued, not once finished
 
-    //this is FUCKED, just as the download part is :) - upload endpoint creates its own thread, making this async on two different levels. await here doesn't mean the response actually came. At this point we have no idea if the transfer actually went well or not
-    updateTransferProgress(transferId, 100);
+    await done; // *this* is the real outcome
+
+    setTransferSuccess(transferId);
     showNotice("Upload complete", "success");
   } catch (err) {
-    showError(err);
-    showNotice(`Upload failed ${err}`, "error");
+    setTransferError(transferId, err?.message ?? String(err), () => uploadReinit(transferId));
+    showNotice(`Upload failed: ${err?.message ?? err}`, "error");
   } finally {
-    removeTransferRow(transferId);
     fetchMap();
-    loadPendingTransfers(); //<-- this gets its response before 1), showing a false failed
+    loadPendingTransfers();
   }
 }
 
@@ -118,10 +143,7 @@ async function uploadReinit(uuid) {
       sendUuid: uuid,
       frontendUuid: uuid,
     });
-    updateTransferProgress(uuid, 100); // safety-net, same reasoning as above
-    showNotice("Upload complete", "success");
   } catch (err) {
-    showError(err);
     showNotice(`Upload failed ${err}`, "error");
   } finally {
     removeTransferRow(uuid);
@@ -144,12 +166,17 @@ async function runDownload(transferId, uuid, isRetry, fileName) {
     }
   });
 
+  const done = waitForTransferCompletion(transferId); // listener armed first
+
   try {
     if (isRetry) {
       await invoke("download_reinit", { username, password, accUuid: uuid, frontendUuid: transferId });
     } else {
       await invoke("download", { username, password, fileUuid: uuid, frontendUuid: transferId, fileName });
     }
+
+    await done; // *this* is the real outcome
+
     setTransferSuccess(transferId);
     showNotice("Download complete", "success");
   } catch (err) {
@@ -754,8 +781,6 @@ function startNewFolderRow() {
 
 newFolderBtn.addEventListener("click", startNewFolderRow);
 
-startTracker.addEventListener("click", track)
-
 async function track() {
   try {
     await invoke("start_tracker", {
@@ -806,3 +831,4 @@ function showNotice(message, type = "info") {
 // Run automatically as soon as the page loads.
 fetchMap();
 loadPendingTransfers();
+track();

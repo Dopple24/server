@@ -44,6 +44,13 @@ struct UploadQueue {
 }
 
 #[derive(serde::Serialize, Clone)]
+struct TransferStatus {
+    transfer_id: String,
+    success: bool,
+    error: Option<String>,
+}
+
+#[derive(serde::Serialize, Clone)]
 struct DownloadItem {
     username: String,
     password: String,
@@ -332,7 +339,9 @@ async fn start_tracker(username: String, password: String, app: AppHandle) -> Re
                 return Err(e.to_string());
             }
         };
-        println!("map: {map:#?}");
+        println!("emitted map");
+        app.emit("folder-map-updated", &map)
+            .map_err(|e| e.to_string())?;
     }
 }
 
@@ -346,14 +355,26 @@ async fn register(username: String, password: String, admin_pass: String) -> Res
     }
 }
 
-fn setup_upload_q(parts: Arc<RwLock<Parts>>, mut handle: AppHandle, rx: Receiver<UploadItem>) {
+fn setup_upload_q(parts: Arc<RwLock<Parts>>, handle: AppHandle, rx: Receiver<UploadItem>) {
     thread::spawn(move || {
         for transfer in rx {
-            let stream = TcpStream::connect(SOCKET)
-                .map_err(|e| e.to_string())
-                .unwrap();
+            let stream = match TcpStream::connect(SOCKET) {
+                Ok(s) => s,
+                Err(e) => {
+                    let _ = handle.emit(
+                        "transfer-complete",
+                        TransferStatus {
+                            transfer_id: transfer.frontend_uuid.clone(),
+                            success: false,
+                            error: Some(e.to_string()),
+                        },
+                    );
+                    continue;
+                }
+            };
 
-            match if transfer.is_reinit {
+            let mut handle_ref = handle.clone();
+            let result = if transfer.is_reinit {
                 reinit(
                     stream,
                     parts.clone(),
@@ -361,7 +382,7 @@ fn setup_upload_q(parts: Arc<RwLock<Parts>>, mut handle: AppHandle, rx: Receiver
                     &transfer.username,
                     &transfer.password,
                     &transfer.frontend_uuid,
-                    &mut handle,
+                    &mut handle_ref,
                 )
             } else {
                 sending(
@@ -372,12 +393,24 @@ fn setup_upload_q(parts: Arc<RwLock<Parts>>, mut handle: AppHandle, rx: Receiver
                     &transfer.password,
                     &transfer.folder_uuid,
                     &transfer.frontend_uuid,
-                    &mut handle,
+                    &mut handle_ref,
                 )
-            } {
-                Ok(_) => (),
-                Err(e) => println!("upload failed: {e:?}"),
-            }
+            };
+
+            let status = match result {
+                Ok(_) => TransferStatus {
+                    transfer_id: transfer.frontend_uuid.clone(),
+                    success: true,
+                    error: None,
+                },
+                Err(e) => TransferStatus {
+                    transfer_id: transfer.frontend_uuid.clone(),
+                    success: false,
+                    error: Some(e.to_string()),
+                },
+            };
+
+            let _ = handle.emit("transfer-complete", status);
         }
     });
 }
@@ -424,7 +457,21 @@ fn setup_download_q(parts: Arc<RwLock<Parts>>, mut handle: AppHandle, rx: Receiv
                     Err(e) => Err(e.to_string()),
                 }
             };
-            println!("result of download: {res:?}");
+
+            let status = match res {
+                Ok(_) => TransferStatus {
+                    transfer_id: transfer.frontend_uuid.clone(),
+                    success: true,
+                    error: None,
+                },
+                Err(e) => TransferStatus {
+                    transfer_id: transfer.frontend_uuid.clone(),
+                    success: false,
+                    error: Some(e.to_string()),
+                },
+            };
+
+            let _ = handle.emit("transfer-complete", status);
         }
     });
 }
