@@ -5,7 +5,6 @@ use std::{
     net::TcpStream,
     os::unix::fs::FileExt,
     path::PathBuf,
-    println,
     sync::{Arc, RwLock},
 };
 
@@ -44,7 +43,7 @@ pub fn guest_request_file(
     let path = match get_path(&file_uuid, &map_store) {
         Ok(p) => p,
         Err(e) => {
-            println!("error: {:?}", e);
+            eprintln!("error: {:?}", e);
             let buf = [48u8; 1];
             let _ = stream.write_all(&buf);
             return;
@@ -87,7 +86,7 @@ pub fn guest_request_file(
     match stream.write_all(&payload) {
         Ok(_) => (),
         Err(e) if is_connection_broken(&e) => {
-            println!("connection broken");
+            eprintln!("connection broken");
             return;
         }
         Err(e) => {
@@ -102,7 +101,7 @@ pub fn guest_request_file(
     match stream.read_exact(&mut ready_buf) {
         Ok(_) => (),
         Err(e) if is_connection_broken(&e) => {
-            println!("connection broken");
+            eprintln!("connection broken");
             return;
         }
         Err(e) => {
@@ -115,7 +114,7 @@ pub fn guest_request_file(
     match ready_buf[0] {
         20 => (),
         _ => {
-            println!("connection broken");
+            eprintln!("connection broken");
             return;
         }
     }
@@ -127,7 +126,7 @@ pub fn guest_request_file(
     match stream.write_all(&buf) {
         Ok(_) => (),
         Err(e) if is_connection_broken(&e) => {
-            println!("connection broken");
+            eprintln!("connection broken");
             return;
         }
         Err(e) => {
@@ -141,7 +140,7 @@ pub fn guest_request_file(
 
     match stream.read(&mut resp) {
         Ok(0) => {
-            println!("connection broken");
+            eprintln!("connection broken");
             return;
         }
         Ok(_) => {
@@ -150,7 +149,7 @@ pub fn guest_request_file(
             }
         }
         Err(e) if is_connection_broken(&e) => {
-            println!("connection broken");
+            eprintln!("connection broken");
             return;
         }
         Err(e) => {

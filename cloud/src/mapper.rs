@@ -363,8 +363,6 @@ impl MapStore {
         };
 
         let folder_uuid = folder.uuid;
-
-        println!("folder.folders: {:?}", folder.folders);
         match guard.find_folder_parent(&folder_uuid, client_uuid) {
             Ok(f) => f,
             Err(e) => {
@@ -375,9 +373,6 @@ impl MapStore {
         .folders
         .retain(|f| {
             let should_retain = f.uuid != folder_uuid;
-            if should_retain {
-                println!("f.uuid: {:?}, folder_uuid: {:?}", f.uuid, folder_uuid);
-            }
             should_retain
         });
         persist(&guard)

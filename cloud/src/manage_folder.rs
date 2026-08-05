@@ -83,7 +83,7 @@ pub fn delete_folder(
     offset: usize,
     signal: &(Mutex<u64>, Condvar),
 ) {
-    println!("delete folder called");
+    println!("delete folder called by client: {client_uuid:?}");
     let folder_uuid_beggining = offset;
     let folder_uuid_end = offset + 16;
     let folder_uuid = Uuid::from_bytes(

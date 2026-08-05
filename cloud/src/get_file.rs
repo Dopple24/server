@@ -59,7 +59,7 @@ pub fn send_file(
     offset: usize,
     reinit: bool,
 ) -> Option<Uuid> {
-    println!("send_file called");
+    println!("send_file called by client: {client_uuid:?}");
     let query = match Query::from_bytes(&first_message[offset..], buf_len) {
         Some(q) => q,
         None => {
@@ -72,7 +72,7 @@ pub fn send_file(
     let path = match query.get_path(&map_store, client_uuid) {
         Ok(p) => p,
         Err(e) => {
-            println!("error: {:?}", e);
+            eprintln!("error: {:?}", e);
             let _ = stream.write_all(&[e.get_code()]);
             return None;
         }
@@ -175,7 +175,7 @@ pub fn send_file(
 
             let mut handles = Vec::new();
 
-            for i in 0..(max_workers as u64).min({
+            for _ in 0..(max_workers as u64).min({
                 let guard = chunks_to_send.0.lock().unwrap_or_else(|e| {
                     eprintln!("chunks_to_send was poisoned: {e:?}");
                     e.into_inner()
@@ -191,7 +191,6 @@ pub fn send_file(
                 handles.push(thread::spawn(move || {
                     worker(arc_file, chunks_to_send, in_flight, tx, aborted);
                 }));
-                println!("worker {i:?} initialized");
             }
             drop(tx);
 
@@ -236,7 +235,7 @@ pub fn send_file(
             return Some(query.file_uuid);
         }
     }
-    println!("SENT 4");
+
     let hash_here = match hash_file(arc_file) {
         Ok(h) => h,
         Err(e) => {
@@ -277,7 +276,6 @@ fn request_missing_chunks(stream: &mut TcpStream, chunks_len: u64) -> Result<Opt
         eprintln!("failed to write: {e:?}");
         return Err(());
     }
-    println!("sent 3");
 
     loop {
         let mut buf = [0u8; 9];
@@ -289,10 +287,9 @@ fn request_missing_chunks(stream: &mut TcpStream, chunks_len: u64) -> Result<Opt
             eprintln!("failed to read: {e:?}");
             return Err(());
         }
-        println!("{:?}", buf);
+
         match buf[0] {
             23 => {
-                println!("23 came");
                 let count = u64::from_be_bytes(buf[1..=8].try_into().unwrap());
                 if count == 0 {
                     return Ok(None);

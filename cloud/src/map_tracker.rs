@@ -13,19 +13,17 @@ pub fn track(
     client_uuid: &Uuid,
     signal: &(Mutex<u64>, Condvar),
 ) {
+    println!("called track by client: {client_uuid:?}");
     let mut last_seen = 0;
     loop {
-        println!("last_seen: {last_seen}");
         let (lock, cvar) = &signal;
         let mut version = lock.lock().unwrap();
         while *version == last_seen {
             version = cvar.wait(version).unwrap();
-            println!("woke up");
         }
 
         last_seen = *version;
         drop(version);
-        println!("called get_map from tracker");
         get_map(&mut stream, &map_store, client_uuid);
     }
 }

@@ -78,7 +78,7 @@ pub fn reinitialize(
     offset: usize,
     signal: &(Mutex<u64>, Condvar),
 ) {
-    println!("reinitialization called");
+    println!("reinitialization called by client: {client_uuid:?}");
 
     let uuid = Uuid::from_bytes(first_message[offset..16 + offset].try_into().unwrap());
 
@@ -274,8 +274,6 @@ fn run_transfer_loop(
     drop(job_tx); // let workers drain remaining jobs, then exit
     drop(tx); // let the writer flush and exit once workers stop acking
 
-    println!("271");
-
     for h in worker_handles {
         if let Err(panic_payload) = h.join() {
             let msg = panic_payload
@@ -288,8 +286,6 @@ fn run_transfer_loop(
     }
     let _ = writer_handle.join();
 
-    println!("285");
-
     outcome.map_err(|e| {
         eprintln!("transfer loop failed: {e:?}");
         let _ = stream.write_all(&[e.get_code()]);
@@ -300,9 +296,6 @@ fn run_transfer_loop(
         eprintln!("hashing failed: {e:?}");
         let _ = stream.write_all(&[ErrorTransfer::InternalServerError.get_code()]);
     })?;
-
-    println!("298");
-    println!("now: {:?}", SystemTime::now());
 
     let mut hash_msg = Vec::with_capacity(33);
     hash_msg.push(MSG_HASH_RESPONSE);
@@ -690,7 +683,6 @@ fn finish_and_register(
         eprintln!("failed to remove config file {cfg_path:?}: {e}");
     }
     notify_change(signal);
-    println!("notified");
 }
 
 fn now_nanos() -> u64 {

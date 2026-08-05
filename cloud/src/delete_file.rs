@@ -24,9 +24,7 @@ pub fn delete_file(
     signal: &(Mutex<u64>, Condvar),
 ) {
     let uuid = Uuid::from_bytes(first_message[offset..16 + offset].try_into().unwrap());
-    println!("uuid: {:?}", uuid);
 
-    println!("client_uuid: {:?}", client_uuid);
     match with_file_mut(&uuid, &map_store, client_uuid, |fil| fil.lock()) {
         Ok(locked) => {
             if !locked {
