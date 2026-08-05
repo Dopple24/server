@@ -1,6 +1,6 @@
-use crate::guest_request_file;
 use crate::reinit::{PartSend, Parts};
 use crate::request_file::ProgressPayload;
+use crate::{guest_request_file, TransferStatus, UploadItem, UploadQueue};
 use blake3::{Hash, Hasher};
 use core::time;
 use std::collections::HashMap;
@@ -104,6 +104,35 @@ pub fn get_parts_rw_lock() -> Arc<RwLock<Parts>> {
     Arc::new(RwLock::new(
         serde_json::from_str(&contents).expect("Failed to parse JSON"),
     ))
+}
+
+pub fn upload_batch(
+    username: String,
+    password: String,
+    folder_uuid: String,
+    upload_q: State<'_, UploadQueue>,
+    paths: Vec<(String, String)>,
+    handle: AppHandle,
+) {
+    paths.into_iter().for_each(|(path, frontend_uuid)| {
+        let item = UploadItem {
+            folder_uuid: folder_uuid.clone(),
+            path,
+            username: username.clone(),
+            password: password.clone(),
+            frontend_uuid: frontend_uuid.clone(),
+            is_reinit: false,
+        };
+        let guard = upload_q.tx.lock().unwrap_or_else(|e| e.into_inner());
+        if let Err(e) = guard.send(item) {
+            let status = TransferStatus {
+                transfer_id: frontend_uuid.clone(),
+                success: false,
+                error: Some(e.to_string()),
+            };
+            let _ = handle.emit("transfer-complete", status);
+        };
+    });
 }
 
 pub fn sending(

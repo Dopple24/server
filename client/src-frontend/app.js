@@ -1,5 +1,6 @@
 const { invoke } = window.__TAURI__.core;
 const { listen } = window.__TAURI__.event;
+const { getCurrentWebview } = window.__TAURI__.webview;
 
 const svg_icon = `<svg class=\"file-icon\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.8\"><path d=\"M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z\" /><path d=\"M14 2v6h6\" /></svg>`;
 
@@ -10,7 +11,6 @@ listen('transfer-progress', (event) => {
 listen('file_name', (event) => {
   const { transfer_id, filename } = event.payload;
   updateFileName(transfer_id, filename)
-
 });
 
 
@@ -28,6 +28,10 @@ const transferHeader = transferManager.querySelector(".transfer-header");
 const username = sessionStorage.getItem("username");
 const password = sessionStorage.getItem("password");
 
+const knownTransferIds = new Set(); // populated by addTransferRow for live/session transfers
+const orphanedTransferIds = new Set(); // populated by loadPendingTransfers itself
+
+
 // Guard: if someone lands here without logging in (e.g. typed the URL,
 // or refreshed after a restart that cleared sessionStorage), bounce back.
 if (!username || !password) {
@@ -36,6 +40,54 @@ if (!username || !password) {
 
 // The full tree, fetched once. Navigation below just walks this in memory.
 let rootFolder = null;
+
+function uploadOne(transferId, done) {
+  return (async () => {
+    try {
+      await done; // resolves/rejects independently per file via transfer-complete
+      setTransferSuccess(transferId);
+      showNotice("Upload complete", "success");
+    } catch (err) {
+      setTransferError(transferId, err?.message ?? String(err), () => uploadReinit(transferId));
+      showNotice(`Upload failed: ${err?.message ?? err}`, "error");
+    } finally {
+      fetchMap();
+      loadPendingTransfers();
+    }
+  })();
+}
+
+(async () => {
+  await getCurrentWebview().onDragDropEvent((event) => {
+    if (event.payload.type !== "drop") return;
+
+    console.log("dropped paths:", event.payload.paths);
+
+    const filesWithIds = event.payload.paths.map((path) => {
+      const uuid = crypto.randomUUID();
+      const filename = path.split(/[/\\]/).pop();
+      addTransferRow(uuid, filename);
+      return [path, uuid];
+    });
+
+    // arm every listener BEFORE invoking, same principle as the single-file version
+    const pending = filesWithIds.map(([path, transferId]) => {
+      const done = waitForTransferCompletion(transferId);
+      return uploadOne(transferId, done);
+    });
+
+    invoke("upload_batch", {
+      username,
+      password,
+      folderUuid: currentFolderUuid(),
+      paths: filesWithIds,
+    }).catch((err) => {
+      // the invoke call itself failed (e.g. couldn't queue at all) —
+      // this affects the whole batch, not a single file
+      showNotice(`Batch upload failed to start: ${err?.message ?? err}`, "error");
+    });
+  });
+})();
 
 listen('folder-map-updated', (event) => {
   const savedPath = currentPathUuids();
@@ -107,7 +159,6 @@ function waitForTransferCompletion(transferId) {
     }).then((fn) => { unlisten = fn; });
   });
 }
-
 async function upload() {
   const transferId = crypto.randomUUID();
   addTransferRow(transferId);
@@ -483,25 +534,6 @@ document.getElementById("logout-btn").addEventListener("click", () => {
 
 document.getElementById("refresh-btn").addEventListener("click", fetchMap);
 
-document.getElementById("run-btn").addEventListener("click", async () => {
-    try {
-        const result = await invoke("run_task");
-        output.textContent =
-            typeof result === "string" ? result : JSON.stringify(result, null, 2);
-    } catch (err) {
-        showError(err);
-    }
-});
-
-document.getElementById("greet-btn").addEventListener("click", async () => {
-    try {
-        const result = await invoke("greet", { name: "World" });
-        output.textContent = result;
-    } catch (err) {
-        showError(err);
-    }
-});
-
 function updateTransferHeader() {
     const count = transferColumn.children.length;
     transferHeader.textContent = `Transferring ${count} file${count === 1 ? "" : "s"}`;
@@ -511,7 +543,9 @@ function updateTransferHeader() {
 function addTransferRow(id, filename) {
     const row = document.createElement("div");
     row.className = "transfer-row";
-    row.dataset.transferId = id;
+  row.dataset.transferId = id;
+
+  knownTransferIds.add(id);
 
     const item = document.createElement("div");
     item.className = "transfer-item";
@@ -586,7 +620,9 @@ function updateFileName(id, file_name) {
 
 function removeTransferRow(id) {
     const row = transferColumn.querySelector(`.transfer-row[data-transfer-id="${id}"]`);
-    if (row) row.remove();
+  if (row) row.remove();
+  knownTransferIds.delete(id);
+  orphanedTransferIds.delete(id);
     updateTransferHeader();
 }
 
@@ -641,21 +677,12 @@ function setTransferError(id, message, onRetry) {
 }
 
 async function remove_part(uuid) {
-  console.log("remove_part: called with uuid =", uuid);
   try {
-    console.log("remove_part: invoking backend remove_part...");
     const result = await invoke("remove_part", {
       uuid,
     });
-    console.log("remove_part: backend call succeeded, result =", result);
-
-    console.log("remove_part: calling fetchMap()");
     fetchMap();
-
-    console.log("remove_part: calling loadPendingTransfers()");
     loadPendingTransfers();
-
-    console.log("remove_part: done");
   } catch (err) {
     console.error("remove_part: failed for uuid =", uuid, "error =", err);
     showNotice(`failed to remove: ${err}`, "error");
@@ -672,37 +699,42 @@ function setTransferSuccess(id) {
 
 async function loadPendingTransfers() {
   try {
-    let transferRows = document.querySelectorAll(".transfer-row");
-    transferRows.forEach(row => {
-      row.remove();
+    // only remove rows that loadPendingTransfers itself created last time,
+    // not rows belonging to active in-session transfers
+    orphanedTransferIds.forEach((id) => removeTransferRow(id));
+    orphanedTransferIds.clear();
+
+    const parts = await invoke("request_parts");
+    console.log(parts);
+
+    parts.acc.forEach((entry) => {
+      const transferId = crypto.randomUUID();
+      const filename = entry.real_path.split("/").pop();
+      addTransferRow(transferId, filename);
+      orphanedTransferIds.add(transferId);
+      setTransferError(
+        transferId,
+        "Incomplete — resume to continue",
+        () => runDownload(transferId, entry.uuid, true)
+      );
     });
-      const parts = await invoke("request_parts");
-      console.log(parts);
 
-        parts.acc.forEach((entry) => {
-            const transferId = crypto.randomUUID();
-            const filename = entry.real_path.split("/").pop();
-            addTransferRow(transferId, filename);
-            setTransferError(
-                transferId,
-                "Incomplete — resume to continue",
-                () => runDownload(transferId, entry.uuid, true)
-            );
-        });
+    parts.send.forEach((entry) => {
+      if (knownTransferIds.has(entry.uuid)) return; // already shown live, skip
 
-        parts.send.forEach((entry) => {
-          const filename = entry.filename;
-          console.log(entry);
-            addTransferRow(entry.uuid, filename);
-            setTransferError(
-                entry.uuid,
-                "Incomplete — resume to continue",
-                () => uploadReinit(entry.uuid, true) // once upload_reinit exists
-            );
-        });
-    } catch (err) {
-        showError(err);
-    }
+      const filename = entry.filename;
+      console.log(entry);
+      addTransferRow(entry.uuid, filename);
+      orphanedTransferIds.add(entry.uuid);
+      setTransferError(
+        entry.uuid,
+        "Incomplete — resume to continue",
+        () => uploadReinit(entry.uuid, true) // once upload_reinit exists
+      );
+    });
+  } catch (err) {
+    showError(err);
+  }
 }
 
 function startNewFolderRow() {

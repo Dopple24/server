@@ -175,6 +175,18 @@ async fn test_dialog(app: tauri::AppHandle) {
     let _ = rx.recv();
     println!("recv returned");
 }
+#[tauri::command]
+async fn upload_batch(
+    username: String,
+    password: String,
+    folder_uuid: String,
+    upload_q: State<'_, UploadQueue>,
+    paths: Vec<(String, String)>,
+    handle: AppHandle,
+) -> Result<(), String> {
+    app::upload_batch(username, password, folder_uuid, upload_q, paths, handle);
+    Ok(())
+}
 
 #[tauri::command]
 async fn upload(
@@ -217,13 +229,20 @@ async fn upload(
         path,
         username,
         password,
-        frontend_uuid,
+        frontend_uuid: frontend_uuid.clone(),
         is_reinit: false,
     };
 
     {
         let guard = upload_q.tx.lock().unwrap_or_else(|e| e.into_inner());
-        guard.send(item);
+        if let Err(e) = guard.send(item) {
+            let status = TransferStatus {
+                transfer_id: frontend_uuid.clone(),
+                success: false,
+                error: Some(e.to_string()),
+            };
+            let _ = app.emit("transfer-complete", status);
+        };
     }
 
     Ok(())
@@ -236,19 +255,27 @@ async fn upload_reinit(
     send_uuid: String,
     frontend_uuid: String,
     upload_q: State<'_, UploadQueue>,
+    handle: AppHandle,
 ) -> Result<(), String> {
     let item = UploadItem {
         folder_uuid: send_uuid,
         path: String::new(),
         username,
         password,
-        frontend_uuid,
+        frontend_uuid: frontend_uuid.clone(),
         is_reinit: true,
     };
 
     {
         let guard = upload_q.tx.lock().unwrap_or_else(|e| e.into_inner());
-        guard.send(item);
+        if let Err(e) = guard.send(item) {
+            let status = TransferStatus {
+                transfer_id: frontend_uuid.clone(),
+                success: false,
+                error: Some(e.to_string()),
+            };
+            let _ = handle.emit("transfer-complete", status);
+        };
     }
 
     Ok(())
@@ -281,14 +308,21 @@ async fn download(
         username,
         password,
         file_uuid,
-        frontend_uuid,
+        frontend_uuid: frontend_uuid.clone(),
         path: Some(path),
         is_reinit: false,
     };
 
     {
         let guard = download_q.tx.lock().unwrap_or_else(|e| e.into_inner());
-        guard.send(item);
+        if let Err(e) = guard.send(item) {
+            let status = TransferStatus {
+                transfer_id: frontend_uuid.clone(),
+                success: false,
+                error: Some(e.to_string()),
+            };
+            let _ = app.emit("transfer-complete", status);
+        };
     }
 
     Ok(())
@@ -301,19 +335,27 @@ async fn download_reinit(
     acc_uuid: String,
     download_q: State<'_, DownloadQueue>,
     frontend_uuid: String,
+    handle: AppHandle,
 ) -> Result<(), String> {
     let item = DownloadItem {
         username,
         password,
         file_uuid: acc_uuid,
-        frontend_uuid,
+        frontend_uuid: frontend_uuid.clone(),
         path: None,
         is_reinit: true,
     };
 
     {
         let guard = download_q.tx.lock().unwrap_or_else(|e| e.into_inner());
-        guard.send(item);
+        if let Err(e) = guard.send(item) {
+            let status = TransferStatus {
+                transfer_id: frontend_uuid.clone(),
+                success: false,
+                error: Some(e.to_string()),
+            };
+            let _ = handle.emit("transfer-complete", status);
+        };
     }
 
     Ok(())
@@ -520,6 +562,7 @@ fn main() {
             share_file,
             remove_part,
             start_tracker,
+            upload_batch,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
